@@ -1,0 +1,64 @@
+# ---- 运行环境与依赖 ----
+envs/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 录像 / 缓存 / 帧数据（几十 G，绝不入库）----
+replay/
+stage1_demo/
+*.avi
+*.mp4
+*.mkv
+*.ts
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.npy
+*.npz
+
+# ---- 编译产物 ----
+build/
+build-*/
+managed_components/
+*.bin
+*.elf
+*.map
+sdkconfig.old
+
+# ---- 资料包（体积大，按需另存）----
+references/
+so101-grasp/
+*.tar.gz
+*.odt
+
+# ---- 厂商 SDK / 二进制安装包（体积大且非本仓库源码）----
+*.deb
+*.rpm
+*.zip
+*.whl
+
+# ---- 日志 ----
+*.log
+
+# ---- 相机 SDK 运行期数据 ----
+*.mvdat
+
+# ---- 内部资料（申报书、工作日志：不上公开/共享仓库）----
+申报材料/
+工作日志/
+
+# ---- 本地私有配置（WiFi 凭据等，绝不入库）----
+*.defaults
+viewer_priv*
+.env
+.env.*
+!/.env.example
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
