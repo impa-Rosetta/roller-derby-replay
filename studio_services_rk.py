@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """赛事监看台：数据 / 服务层（与 UI 完全解耦）
 
-所有类都不 import 任何 GUI 库，只做「连接 Jetson、取流、拉片段、远端控制」。
+所有类都不 import 任何 GUI 库，只做「连接 RK3588、取流、拉片段、远端控制」。
 未来局域网移动端遥控器可以直接复用本模块，UI 只负责展示与交互。
 
 分层：
   LiveFeed    直播解码线程：TCP 裸 HEVC → NVDEC/PyAV → 最新帧（BGR ndarray）
   Archive     远端录制目录轮询线程：拿到已封存分段列表 meta
   ClipLoader  拉取远端分段 → scp → 本地 remux 缓存，供回放定位
-  RemoteCtrl  通过 ssh 启动/停止 Jetson 录制管线
+  RemoteCtrl  通过 ssh 启动/停止 RK3588 录制管线
 """
 import json
 import os
@@ -25,7 +25,7 @@ from collections import deque
 import numpy as np
 import cv2
 
-from dgx_viewer import LiveDecoder, connect
+from dgx_viewer_rk import LiveDecoder, connect
 from hk_replay_fetch import remux_mkv
 
 
@@ -47,7 +47,7 @@ def default_record_dir():
     launch 时若 archive.json 里记过别的目录，以那份为准（见 Controller）。
     """
     return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        'replay', 'archive')
+                        'replay', 'archive_rk')
 
 
 def read_session_dir(path):
@@ -173,7 +173,7 @@ class LiveFeed(threading.Thread):
 
         self.image = None
         self.image_t = 0.0
-        # 该帧的服务端采集时刻（录制侧秒数）。需要 Jetson 发 SLIVE1 头 +
+        # 该帧的服务端采集时刻（录制侧秒数）。需要 RK3588 发 SLIVE1 头 +
         # 绝对锚点；没有时为 None，UI 退回按经验值估算。
         self.image_pts = None
         self.image_pts_t = 0.0     # image_pts 对应的本机单调时刻（解码时打点）
@@ -194,7 +194,7 @@ class LiveFeed(threading.Thread):
         self.anchor_t = 0.0        # 读到锚点时的本机单调时刻
         self.push_t = 0.0          # 最新帧 arrive 时刻（取走后归 0）
         # 画面"传输+解码"延迟样本：每帧交付时刻 - 该帧录制轴时刻。
-        # 注意它不含 Jetson 直播分发队列里还没发出来的那部分，所以只当
+        # 注意它不含 RK3588 直播分发队列里还没发出来的那部分，所以只当
         # 下限用；真正的总延迟由控制器用画面内容自动对时（见 lat_probe）。
         self._lat_win = deque(maxlen=90)
         self.transport_lat = None
@@ -238,7 +238,7 @@ class LiveFeed(threading.Thread):
         """屏幕上这帧在录制轴上已是第几秒；对不上返回 None。
 
         解码器用自己的连接内字节增量算出位置（不依赖任何绝对时间钟，
-        所以 Jetson 时间不准也照样准）。这里只处理**换连接**：服务端
+        所以 RK3588 时间不准也照样准）。这里只处理**换连接**：服务端
         重启或重连后录制轴会从 0 重新计，新旧两条轴要接起来。
         """
         dec = self.dec
@@ -413,7 +413,7 @@ class LiveFeed(threading.Thread):
 # ---------------------------------------------------------------------------
 
 class Archive(threading.Thread):
-    """轮询 Jetson 当前录制目录的 meta.jsonl，拿到已封存分段"""
+    """轮询 RK3588 当前录制目录的 meta.jsonl，拿到已封存分段"""
 
     def __init__(self, remote, root, interval=3.0):
         super().__init__(daemon=True)
@@ -425,7 +425,7 @@ class Archive(threading.Thread):
         self.segments = []
         self.session = ''
         # 录制起点（绝对 UTC 秒）。优先取 meta 首行的 base_ms，没有则用目录名
-        # 里的启动时刻（stage1_YYYYmmdd_HHMMSS 是 Jetson 本地墙钟）。
+        # 里的启动时刻（stage1_YYYYmmdd_HHMMSS 是 RK3588 本地墙钟）。
         self.base_wall = None
         self.camera_alarm = None
         self.error = ''
@@ -486,10 +486,15 @@ class Archive(threading.Thread):
         # 读取的，其时刻≈中点；脚本开头 date +%s%N 让这份时刻精确到毫秒，
         # 不再受 ssh 建链（可长达 1~4s）误差影响。
         t0 = time.time()
-        p = subprocess.run(
-            ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-             self.remote, 'date +%s%N; ' + cmd],
-            capture_output=True, text=True, timeout=20)
+        if self.remote is None:
+            p = subprocess.run(
+                ['bash', '-lc', 'date +%s%N; ' + cmd],
+                capture_output=True, text=True, timeout=20)
+        else:
+            p = subprocess.run(
+                ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+                 self.remote, 'date +%s%N; ' + cmd],
+                capture_output=True, text=True, timeout=20)
         t1 = time.time()
         mid = (t0 + t1) / 2.0
         lines = p.stdout.splitlines()
@@ -590,7 +595,7 @@ def _dir_wall_ms(session):
         st = time.mktime(time.strptime(base[7:22], '%Y%m%d_%H%M%S'))
     except ValueError:
         return None
-    # mktime 按本地时区解释；Jetson 与 DGX 现在都走 Asia/Shanghai
+    # mktime 按本地时区解释；RK3588 与 DGX 现在都走 Asia/Shanghai
     return st * 1000.0
 
 
@@ -619,7 +624,7 @@ class ClipLoader(threading.Thread):
     def __init__(self, remote, cache_dir, cache_max_gb=20.0,
                  local_dirs=None):
         super().__init__(daemon=True)
-        self.remote = remote
+        self.remote = remote      # None = 本机模式
         self.cache_dir = cache_dir
         self.cache_max_gb = cache_max_gb
         # 本机归档目录：归档成功后远端原文件会被删掉，此时再去 scp 必然
@@ -821,6 +826,12 @@ class ClipLoader(threading.Thread):
                     if os.path.abspath(local) != os.path.abspath(part):
                         shutil.copyfile(local, part)
                     err = ''
+                elif self.remote is None:
+                    # 本机模式但没有命中 _local_src：直接用段自带的绝对 dir。
+                    srcp = os.path.join(seg['dir'], seg['file'])
+                    if os.path.abspath(srcp) != os.path.abspath(part):
+                        shutil.copyfile(srcp, part)
+                    err = ''
                 else:
                     with self.cv:
                         self.proc = subprocess.Popen(
@@ -883,10 +894,15 @@ class ClipLoader(threading.Thread):
 # ---------------------------------------------------------------------------
 
 class RemoteCtrl:
-    """通过 ssh 启动/停止 Jetson 录制管线（直播源）"""
+    """启动/停止录制管线（直播源）。
+
+    remote=None → 本机模式：管线和监看台在同一台 RK3588 上，直接起子进程，
+                  不经 ssh。这是 RK3588 独立部署的目标形态。
+    remote='xxx' → 远端模式：ssh 到另一台机器起管线（保留兼容）。
+    """
 
     def __init__(self, remote, remote_root, segment=10.0, ring=90.0,
-                 live_port=9101, min_free_gb=10.0, thumb_port=9102):
+                 live_port=9101, min_free_gb=10.0, thumb_port=0):
         self.remote = remote
         self.remote_root = remote_root
         self.segment = segment
@@ -897,7 +913,15 @@ class RemoteCtrl:
         self.thumb_port = thumb_port
         self.min_free_gb = min_free_gb
 
+    @property
+    def local(self):
+        return self.remote is None
+
     def _ssh(self, cmd, timeout=20):
+        if self.local:
+            return subprocess.run(
+                ['bash', '-lc', cmd],
+                capture_output=True, text=True, timeout=timeout)
         return subprocess.run(
             ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6',
              self.remote, cmd],
@@ -905,36 +929,36 @@ class RemoteCtrl:
 
     # 录制进程探针：只认 comm=python3 的进程，避免匹配到 ssh 远端 shell 自身
     _PROBE = ("ps -eo comm=,args= | awk '$1==\"python3\" && "
-              "/hk_pipeline_test[.]py/ {f=1} END {exit !f}'")
+              "/hk_pipeline_rk[.]py/ {f=1} END {exit !f}'")
 
     def _start_cmd(self):
-        # 启动后必须复核进程真的活着再报 STARTED。之前直接 `& echo STARTED`
-        # 只看 ssh 会话起来了就算成功——当磁盘低于 --min-free-gb 时管线会
-        # 打印"磁盘剩余 X GB，低于 --min-free-gb"后立刻退出，监看台却报
-        # 「录制已启动」，直播黑屏，排查方向被带偏。
-        # 顺带把 /tmp/hk_record.log 的末尾几行带回来，拒绝原因可直接进状态栏。
-        return ('if %s; then echo ALREADY; exit 0; fi; '
-                '( cd ~/hk_camera && exec setsid /usr/bin/python3 '
-                'hk_pipeline_test.py --seconds 0 --segment %g --ring %g '
-                '--live-port %d --thumb-port %d '
-                '--min-free-gb %g --out %s ) '
-                '< /dev/null > /tmp/hk_record.log 2>&1 & '
-                # 相机开流 + 编码器初始化约需 2-4 秒，先给 3 秒再看。
-                'sleep 3; '
-                'if %s; then echo STARTED; else '
-                'echo "START_FAILED: $(tail -n 3 /tmp/hk_record.log '
-                '| tr \'\\n\' \' \')"; fi'
-                % (self._PROBE, self.segment, self.ring, self.live_port,
-                   self.thumb_port, self.min_free_gb, self.remote_root,
-                   self._PROBE))
+        # Only an explicit new recording resets the camera; an existing one is untouched.
+        import shlex
+        root = self.remote_root
+        out = ('"$HOME"/' + shlex.quote(root[2:])) if root.startswith('~/') else shlex.quote(root)
+        reason = '$(tail -n 4 /tmp/hk_record.log | tr "\\n" " ")'
+        return (
+            'if %s; then echo ALREADY; exit 0; fi; '
+            '( . /etc/profile.d/mvs_env.sh 2>/dev/null; '
+            'cd ~/hk_camera && exec setsid /usr/bin/python3 -u '
+            'hk_pipeline_rk.py --reset-camera --seconds 0 --segment %g --ring %g '
+            '--live-port %d --thumb-port %d --min-free-gb %g --out %s ) '
+            '< /dev/null > /tmp/hk_record.log 2>&1 & rec_pid=$!; '
+            'for i in $(seq 1 35); do sleep 1; '
+            'if ! %s; then echo "START_FAILED: %s"; exit 0; fi; '
+            'if grep -q "\\[lat\\]" /tmp/hk_record.log; then echo STARTED; exit 0; fi; '
+            'done; kill -TERM "$rec_pid" 2>/dev/null; '
+            'echo "START_FAILED: camera produced no encoded frames in time; %s"'
+            % (self._PROBE, self.segment, self.ring, self.live_port,
+               self.thumb_port, self.min_free_gb, out, self._PROBE, reason, reason))
 
     def _stop_cmd(self):
         # 不依赖 recorder.pid（实测该文件常不存在，导致本机点停止后
         # 脚本返回 NO_PID、录制照跑不停）。直接按进程命令行匹配，只认
-        # comm=python3 且跑 hk_pipeline_test.py 的进程，避免误杀 ssh 远端
+        # comm=python3 且跑 hk_pipeline_rk.py 的进程，避免误杀 ssh 远端
         # shell 自身。SIGTERM 是管线自己的优雅退出路径（收尾写 meta、清 pid）。
         return ("pids=$(ps -eo comm=,pid=,args= | awk '$1==\"python3\" && "
-                "/hk_pipeline_test[.]py/ {print $2}'); "
+                "/hk_pipeline_rk[.]py/ {print $2}'); "
                 "if [ -z \"$pids\" ]; then echo NO_PROC; exit 0; fi; "
                 "for p in $pids; do kill -TERM \"$p\" && echo \"STOPPING $p\"; "
                 "done; "
@@ -952,7 +976,7 @@ class RemoteCtrl:
         STARTED 必须由后端复核进程存活后才会返回；进程起来就挂掉
         （典型：磁盘低于 --min-free-gb）返回 FAIL，说明里带拒绝原因。
         """
-        p = self._ssh(self._start_cmd(), timeout=40)
+        p = self._ssh(self._start_cmd(), timeout=55)
         out = (p.stdout + '\n' + p.stderr).strip()
         if 'ALREADY' in p.stdout:
             return 'ALREADY', out
@@ -978,9 +1002,9 @@ class RemoteCtrl:
 # ---------------------------------------------------------------------------
 
 class Archiver:
-    """把 Jetson 上的整场录像拉回本机目录，可选归档后删除远端原文件。
+    """把 RK3588 上的整场录像拉回本机目录，可选归档后删除远端原文件。
 
-    设计约束（见 project_var_replay_system）：录制期间数据只落 Jetson 本地
+    设计约束（见 project_var_replay_system）：录制期间数据只落 RK3588 本地
     盘，绝不走网络——网络抖动会直接毁掉录像。因此「存在哪」只能是**事后**
     归档的目标，不能是录制时的写入位置。
 
@@ -994,7 +1018,15 @@ class Archiver:
         self.remote = remote
         self.remote_root = remote_root
 
+    @property
+    def local(self):
+        return self.remote is None
+
     def _ssh(self, cmd, timeout=30):
+        if self.local:
+            return subprocess.run(
+                ['bash', '-lc', cmd],
+                capture_output=True, text=True, timeout=timeout)
         return subprocess.run(
             ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6',
              self.remote, cmd],
@@ -1039,7 +1071,7 @@ class Archiver:
     def local_sessions(self, dest_dir):
         """本机归档目录里已有的场次名（新的在前）。
 
-        归档默认会删掉 Jetson 原文件，之后 Archive 轮询就找不到场次了，
+        归档默认会删掉 RK3588 原文件，之后 Archive 轮询就找不到场次了，
         回放只能从本地归档目录读——见 StudioController.local_archive_dir。
         """
         try:
@@ -1055,7 +1087,7 @@ class Archiver:
     def load_local(self, sess_name, dest_dir):
         """把本机归档目录里的一个场次读成 sections 列表。
 
-        归档删掉 Jetson 原文件后，远端已经没有这个场次了，但录像在本机
+        归档删掉 RK3588 原文件后，远端已经没有这个场次了，但录像在本机
         依然是完整可回放的。读它的 meta.jsonl，字段口径与 _refresh 一致
         （dir/start_s/end_s/frames/bytes）。返回空列表表示没有可读的 meta。
         """
@@ -1131,6 +1163,13 @@ class Archiver:
             return 'OK', '已存在于 %s' % final
         if os.path.isfile(final):
             return 'FAIL', '目标路径被同名文件占用: %s' % final
+
+        if self.local:
+            # 本机模式：源码和目标在同一台 RK3588 上。若同盘直接 rename，
+            # 跨盘退化为 shutil.move（自动复制+删除）。不再走 rsync/scp。
+            return self._archive_local(sess, dest_dir, final, part,
+                                       total, info, remove_remote, prog,
+                                       cancel_evt)
 
         src = '%s:%s/%s/' % (self.remote, self.remote_root, sess)
         # --info=progress2 的百分比基于总量，适合直接喂进度条；
@@ -1227,10 +1266,63 @@ class Archiver:
                 p2 = self._ssh('rm -rf %s/%s && echo REMOVED'
                                % (self.remote_root, sess), timeout=60)
                 if 'REMOVED' not in p2.stdout:
-                    return 'OK', note + '；但删除 Jetson 原文件失败，请手工清理'
-                note += '；Jetson 原文件已删除（本场回放改读本地归档）'
+                    return 'OK', note + '；但删除 RK3588 原文件失败，请手工清理'
+                note += '；RK3588 原文件已删除（本场回放改读本地归档）'
             except Exception as e:
-                return 'OK', note + '；删除 Jetson 原文件失败: %s' % e
+                return 'OK', note + '；删除 RK3588 原文件失败: %s' % e
+        return 'OK', note
+
+    def _archive_local(self, sess, dest_dir, final, part, total, info,
+                       remove_remote, prog, cancel_evt):
+        """本机模式归档：源和目标都在本机，用移动代替网络传输。
+
+        同盘 rename 瞬时完成；跨盘 shutil.move 会复制后删除源目录。
+        先移到 .partial 再改名，保持与远端模式一致的"原子完成"语义。
+        """
+        src_dir = os.path.join(self.remote_root, sess)
+        prog(0, total, 'connect')
+        if not os.path.isdir(src_dir):
+            return 'FAIL', '找不到场次目录 %s' % src_dir
+        try:
+            if os.path.isdir(part):
+                shutil.rmtree(part, ignore_errors=True)
+            prog(0, total, 'transfer')
+            shutil.move(src_dir, part)
+            prog(total, total, 'transfer')
+
+            prog(total, total, 'verify')
+            n_local = 0
+            b_local = 0
+            for root, _dirs, files in os.walk(part):
+                for fn in files:
+                    if fn.endswith('.h265'):
+                        n_local += 1
+                    try:
+                        b_local += os.path.getsize(os.path.join(root, fn))
+                    except OSError:
+                        pass
+            if n_local != info['segments']:
+                return 'FAIL', '校验失败：本地 %d 段，源 %d 段' % (
+                    n_local, info['segments'])
+            if abs(b_local - total) > max(4096, total * 0.005):
+                return 'FAIL', '校验失败：本地 %.1fMB，源 %.1fMB' % (
+                    b_local / 1e6, total / 1e6)
+
+            prog(total, total, 'rename')
+            if os.path.isdir(final):
+                try:
+                    os.rmdir(final)
+                except OSError:
+                    return 'FAIL', '目标已存在且非空: %s' % final
+            os.rename(part, final)
+        except OSError as e:
+            return 'FAIL', '本机归档失败: %s' % e
+
+        note = '已归档到 %s（%d 段 / %.1f MB）' % (
+            final, n_local, total / 1e6)
+        if remove_remote:
+            # 本机模式下 src_dir 已被 move 走，无需再删。
+            note += '（源目录已移走）'
         return 'OK', note
 
 

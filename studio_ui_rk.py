@@ -29,9 +29,9 @@ from tkinter import ttk, font as tkfont
 import cv2
 import numpy as np
 
-import studio_services as svc
+import studio_services_rk as svc
 import studio_theme as T
-from studio_services import fmt_time, fmt_size
+from studio_services_rk import fmt_time, fmt_size
 
 # Tk 8.6 在 HiDPI 下按 points 放大字体（本例 110dpi → 1.53x），但 Canvas
 # 像素尺寸 / Listbox 行高不跟，导致 UI 元素与文字不成比例。这里统一换算。
@@ -226,7 +226,7 @@ class StudioUI:
         self._tl_hover = None
         self._dialog_open = False   # 模态框开着时别再弹
 
-        root.title('赛事监看台 · 轮滑阻拦')
+        root.title('RK3588 赛事监看台 · %s' % args.host)
         root.configure(bg=T.BG_APP)
         root.geometry('%dx%d' % (args.window_width, args.window_height))
         root.minsize(1100, 720)
@@ -261,7 +261,7 @@ class StudioUI:
         r.bind('<F1>', lambda e: self._key(self.ctl.to_live))
         r.bind('<F2>', lambda e: self._key(self.ctl.to_replay))
         r.bind('<F5>', lambda e: self._key(self.ctl.snapshot))
-        # F9 走和按钮同一条路径：先选归档目录，再起 Jetson
+        # F9 走和按钮同一条路径：先选归档目录，再起 RK3588
         r.bind('<F9>', lambda e: self._key(self._begin_recording))
         r.bind('<F10>', lambda e: self._key(self.ctl.stop_recording))
         r.bind('1', lambda e: self._key(lambda: self.ctl.set_speed(0)))
@@ -581,7 +581,7 @@ class StudioUI:
             b.pack(side='left', padx=(0, px(6)))
             return b
 
-        # 开始录制前先选归档目录（录制期间仍写 Jetson，停止后再拷回来）
+        # 开始录制前先选归档目录（录制期间仍写 RK3588，停止后再拷回来）
         self.btn_start = mkbtn('● 开始录制', self._begin_recording,
                                'live', 108)
         self.btn_stop = mkbtn('■ 停止', self.ctl.stop_recording, 'danger', 76)
@@ -787,8 +787,8 @@ class StudioUI:
             t = max(t0, min(t1, self._tl_hover))
             self._draw_hover_tip(int(max(0, min(w, tx(t)))))
 
-    def _tl_window(self, span_s=600.0):
-        """时间轴显示窗口：超长场次只画最后 span_s 秒"""
+    def _tl_window(self, span_s=None):
+        """默认从0秒显示完整场次，随总时长自动缩放。"""
         segs, t0 = self.ctl.segments_window(span_s)
         return segs, t0
 
@@ -894,7 +894,7 @@ class StudioUI:
 
     # ---------- 刷新（主循环调用）----------
     def _begin_recording(self):
-        """开始录制：先问归档位置，再起 Jetson。"""
+        """开始录制：先问归档位置，再起 RK3588。"""
         if self.ctl.remote_busy or self.ctl.recording:
             return
         dlg = ArchiveDirDialog(self.root, self.ctl)
@@ -1003,7 +1003,7 @@ class StudioUI:
             pct = min(100, int(100.0 * st['archive_done'] / tot))
             phase = {'connect': '连接中', 'transfer': '传输中',
                      'verify': '校验中', 'rename': '收尾中',
-                     'cleanup': '清理 Jetson 文件'}.get(
+                     'cleanup': '清理 RK3588 文件'}.get(
                          st['archive_phase'], st['archive_phase'])
             self.lbl_status.config(
                 text='归档 %s：%s  %d%%  (%.1f/%.1f GB) → %s' % (
@@ -1134,7 +1134,7 @@ class _ModalDialog(tk.Toplevel):
 class ArchiveDirDialog(_ModalDialog):
     """开始录制前：选本次录像的归档目录。
 
-    录制期间数据仍只落 Jetson（不依赖网络），这里选的只是「停止后
+    录制期间数据仍只落 RK3588（不依赖网络），这里选的只是「停止后
     拷回哪里」。
     """
 
@@ -1147,7 +1147,7 @@ class ArchiveDirDialog(_ModalDialog):
         self._label(body, '本次录像归档位置', T.F_TITLE).pack(anchor='w')
         self._label(
             body,
-            '录制期间先存 Jetson 本地（保证网络异常也不丢录像），\n'
+            '录制期间先存 RK3588 本地（保证网络异常也不丢录像），\n'
             '停止后再自动拷到这个目录。',
             T.F_SMALL, T.FG_MUTED).pack(anchor='w', pady=(px(6), px(16)))
 
@@ -1356,7 +1356,7 @@ class OpenSessionDialog(_ModalDialog):
 
 
 class ArchiveConfirmDialog(_ModalDialog):
-    """停止录制后：确认归档到哪、要不要删 Jetson 原文件。"""
+    """停止录制后：确认归档到哪、要不要删 RK3588 原文件。"""
 
     def __init__(self, parent, ctl, sess, info):
         super().__init__(parent, '录像已停止', 700, 400)
@@ -1398,7 +1398,7 @@ class ArchiveConfirmDialog(_ModalDialog):
         # 删除远端是危险动作：默认不勾，且要裁判主动选
         self.remove = tk.BooleanVar(value=False)
         chk = tk.Checkbutton(
-            body, text='归档校验通过后，删除 Jetson 上的原文件（释放空间）',
+            body, text='归档校验通过后，删除 RK3588 上的原文件（释放空间）',
             variable=self.remove, font=T.F_SMALL, fg=T.WARN_AMBER,
             bg=T.BG_APP, activebackground=T.BG_APP,
             activeforeground=T.FG_TEXT, selectcolor=T.BG_RAISED,

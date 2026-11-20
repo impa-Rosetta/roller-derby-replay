@@ -19,7 +19,7 @@ feed.image_n、回放依赖 cv2.VideoCapture，都不是线程安全的。所以
 
 用法（studio_app.py 里）:
     from referee_data import PadServer
-    self.pad = PadServer(self, port=8610)
+    self.pad = PadServer(self, port=8611)
     self.pad.start()
     # 主循环里 ctl.tick() 之后调 self.pad.pump()
 
@@ -248,7 +248,7 @@ def encode_jpg_locked(img, quality=70):
 class PadLiveTap(threading.Thread):
     """直接搬监看台已经解好的直播帧，不另开解码器。
 
-    监看台自己就在拉 Jetson 9102 缩略流（LiveFeed），这里只做 JPEG
+    监看台自己就在拉 RK3588 9102 缩略流（LiveFeed），这里只做 JPEG
     编码。handheld_server.py 那套 FrameHub 会另起一路 NVDEC，与其重复
     解同一路流，不如复用内存里现成的那帧。
     """
@@ -583,7 +583,7 @@ class PadServer:
 
     PORT_TRIES = 4
 
-    def __init__(self, ctl, port=8610, host='0.0.0.0'):
+    def __init__(self, ctl, port=8611, host='0.0.0.0'):
         self.ctl = ctl
         self.port = port
         self.host = host
@@ -700,7 +700,7 @@ class PadServer:
                     fut.set_result(res)
 
     def _refresh_remote(self):
-        """每 5 秒让后台线程刷一次 Jetson 上的场次名。"""
+        """每 5 秒让后台线程刷一次 RK3588 上的场次名。"""
         if self._remote_busy or time.monotonic() - self._remote_t < 5.0:
             return
         self._remote_t = time.monotonic()

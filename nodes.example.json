@@ -1,0 +1,36 @@
+{
+  "nodes": [
+    {
+      "id": "rk1",
+      "host": "192.168.123.100",
+      "remote": "rk3588",
+      "remote_root": "~/hk_record",
+      "live_port": 9101,
+      "referee_port": 8611
+    },
+    {
+      "id": "rk2",
+      "host": "192.168.123.101",
+      "remote": "rk3588-2",
+      "remote_root": "~/hk_record",
+      "live_port": 9101,
+      "referee_port": 8612
+    },
+    {
+      "id": "rk3",
+      "host": "192.168.123.102",
+      "remote": "rk3588-3",
+      "remote_root": "~/hk_record",
+      "live_port": 9101,
+      "referee_port": 8613
+    },
+    {
+      "id": "rk4",
+      "host": "192.168.123.103",
+      "remote": "rk3588-4",
+      "remote_root": "~/hk_record",
+      "live_port": 9101,
+      "referee_port": 8614
+    }
+  ]
+}

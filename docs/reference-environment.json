@@ -1,0 +1,15 @@
+{
+  "python": "3.10.12 (main, Mar  3 2026, 11:56:32) [GCC 11.4.0]",
+  "kernel": "6.1.141",
+  "av": "12.0.0",
+  "opencv": "4.5.4",
+  "numpy": "1.21.5",
+  "sha256": {
+    "/usr/local/bin/ffmpeg": "2a30d449581e815b5ea9b1bd2d2ca9fbeb8a146ededbecc198b5a8f9fa1cc80e",
+    "/usr/local/bin/ffprobe": "222518eb222923b897c4dc8bc345263608c7179f0d1c08a5d8a87e62d756793d",
+    "/usr/lib/aarch64-linux-gnu/librockchip_mpp.so.1": "9097b4e09cf704fae38333ebfbe2dce7fd36bb49f2403183f59263a50cfefe9f",
+    "/usr/lib/aarch64-linux-gnu/librga.so.2": "a71958cf4940743ad0b7c209447d7340d301dbe03bd44b4ea2127dd91e4de2e6",
+    "/opt/MVS/lib/aarch64/libMvCameraControl.so": "916ca68146ae867ab6d27bb0f7aef4e47383349a58f86bba2983db77359c8c44"
+  },
+  "ffmpeg_build": "ffmpeg version 6.1 Copyright (c) 2000-2023 the FFmpeg developers\nbuilt with gcc 11 (Ubuntu 11.4.0-1ubuntu1~22.04.2)\nconfiguration: --prefix=/usr/local --enable-gpl --enable-version3 --enable-nonfree --enable-shared --enable-static --enable-pic --enable-ffplay --enable-ffprobe --enable-libdrm --enable-rkmpp --enable-rkrga --enable-sdl2 --enable-outdev='fbdev,sdl2' --enable-indev=fbdev --enable-filter=scale_rkrga --enable-hwaccel='h264_rkmpp,hevc_rkmpp,vp8_rkmpp,vp9_rkmpp' --enable-decoder='h264_rkmpp,hevc_rkmpp,vp8_rkmpp,vp9_rkmpp,mjpeg_rkmpp' --enable-encoder='h264_rkmpp,hevc_rkmpp,mjpeg_rkmpp' --enable-libx264 --enable-libx265 --enable-libvpx --enable-libfdk-aac --enable-libmp3lame --enable-libopus --enable-libvorbis --enable-libass --enable-libfreetype --extra-cflags=-I/usr/include --extra-ldflags=-L/usr/lib --extra-libs='-lpthread -lm -ldl' --bindir=/usr/local/bin --enable-cross-compile --arch=arm64 --target-os=linux\nlibavutil      58. 29.100 / 58. 29.100\nlibavcodec     60. 31.102 / 60. 31.102\nlibavformat    60. 16.100 / 60. 16.100\nlibavdevice    60.  3.100 / 60.  3.100\nlibavfilter     9. 12.100 /  9. 12.100\nlibswscale      7.  5.100 /  7.  5.100\nlibswresample   4. 12.100 /  4. 12.100\nlibpostproc    57.  3.100 / 57.  3.100\n"
+}

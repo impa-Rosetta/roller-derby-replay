@@ -36,46 +36,81 @@ SRC_ASPECT = 2048.0 / 2448.0   # MV-CS050-60UC 传感器 2448×2048
 _gst_ok = None
 
 
-def gst_live_available():
-    """GStreamer 硬解直播是否可用（DGX 实测约 250 fps）"""
+def gst_live_elements():
+    """挑出可用的 (解码器, 缩放器)；没有硬解组合时返回 None
+
+    两个平台各有一套，都是硬件解码 + 硬件缩放：
+      DGX/Jetson  nvh265dec   + videoscale   （实测约 250 fps）
+      RK3588      mppvideodec + rgaconvert   （实测 530 fps 纯解，含 RGA
+                                             缩放后 170 fps）
+    缩放必须走硬件：RK3588 上 mppvideodec + 软件 videoscale 只有 5.6 fps
+    （2026-11-19 实测，480 帧 30 秒才解 168 帧），换 rgaconvert 后 170 fps，
+    差了 30 倍。四路直播同开时这个差距是能不能用的分水岭。
+    """
     global _gst_ok
-    if _gst_ok is None:
-        _gst_ok = False
-        try:
-            import gi
-            gi.require_version('Gst', '1.0')
-            gi.require_version('GstApp', '1.0')
-            from gi.repository import Gst
-            if not Gst.is_initialized():
-                Gst.init(None)
-            need = ('h265parse', 'nvh265dec', 'videoscale', 'appsrc',
-                    'appsink')
-            _gst_ok = all(Gst.ElementFactory.find(n) is not None
-                          for n in need)
-        except Exception:
-            _gst_ok = False
+    if _gst_ok is not None:
+        return _gst_ok or None
+    _gst_ok = None
+    try:
+        import gi
+        gi.require_version('Gst', '1.0')
+        gi.require_version('GstApp', '1.0')
+        from gi.repository import Gst
+        if not Gst.is_initialized():
+            Gst.init(None)
+        have = Gst.ElementFactory.find
+        for dec, scale in (('nvh265dec', 'videoscale'),
+                           ('mppvideodec', 'rgaconvert')):
+            if have(dec) and have(scale) and have('h265parse') \
+                    and have('appsrc') and have('appsink'):
+                _gst_ok = (dec, scale)
+                break
+    except Exception:
+        _gst_ok = None
     return _gst_ok
 
 
+def gst_live_available():
+    """GStreamer 硬解直播是否可用"""
+    return gst_live_elements() is not None
+
+
 def split_aus(buf):
-    """按 AUD 切出完整 AU，末尾不完整的留在 buf 里"""
-    pos = []
+    """切出完整 AU，末尾不完整的留在 buf 里
+
+    以前只认 AUD(NAL 35) 作为 AU 边界，但 RK3588 的 mpph265enc 不产出
+    AUD（实测直播流里 NAL 类型只有 32/33/34/19/1，一个 35 都没有），
+    结果一个 AU 都切不出来，直播永久 0 帧。
+
+    现在按"每个 VCL 帧各自成一个 AU"切：
+
+      VPS(32)/SPS(33)/PPS(34) 是参数集，跟在所属 AU 的头部；
+      VCL(0..31，即 TRAIL_R/IDR/CRA 等) 每出现一个就结束当前 AU。
+      因为编码器是 gop=N 无 B 帧（首帧 IDR，其余 P），一帧正好一个 VCL
+      NAL，所以一个 AU = 参数集(可选) + 一个 VCL。
+
+    末尾的半个 AU（最后一个 VCL 后面还没收到数据）留着等下一批——
+    切早了解码器会拿到截断的帧。
+    """
+    ends = []           # 每个完整 AU 的结束位置（下一个 AU 的起始）
+    next_start = 0      # 当前 AU 的起始
+    seen_vcl = False
     i = 0
     while True:
         j = buf.find(b'\x00\x00\x01', i)
         if j < 0 or j + 3 >= len(buf):
             break
-        if ((buf[j + 3] >> 1) & 0x3F) == AUD:
-            pos.append(j)
+        t = (buf[j + 3] >> 1) & 0x3F
+        if t < 32:                      # VCL NAL
+            if seen_vcl:                # 上一帧已经完整，这里是新 AU 的开始
+                ends.append((next_start, j))
+                next_start = j
+            seen_vcl = True
         i = j + 3
-    if len(pos) < 2:
+    if not ends:
         return [], buf
-    out = []
-    start = 0
-    for c in pos[1:]:
-        out.append(buf[start:c])
-        start = c
-    return out, buf[start:]
+    out = [buf[a:b] for a, b in ends]
+    return out, buf[next_start:]
 
 
 def au_has_idr(au):
@@ -91,6 +126,29 @@ def au_has_idr(au):
         i = j + 3
 
 
+def strip_live_header(buf):
+    """剥掉服务端插在参数集之后的 'SLIVE1' + 16 字节头。
+
+    返回 (剩下的字节, 是否已剥过)。头没到齐就原样返回，等下一批。
+    软解路径以前完全不剥这个头，头里的 21 个字节直接喂给 PyAV，
+    hevc 解析器碰到就报错、一帧都解不出来（2026-11-19 在 RK3588 上
+    实测 frames=0，而服务端明明在推 2.5 MB/s）。硬解路径有
+    LiveDecoder._consume_header 负责，软解这条路也必须剥。
+    """
+    i = buf.find(b'SLIVE1')
+    if i < 0:
+        return buf, False
+    if len(buf) < i + 22:       # 6 字节标记 + 8 PTS + 8 monotonic
+        return buf, False
+    tail = buf[i + 22:i + 26]
+    if not (tail[:3] == b'\x00\x00\x01' or tail[:4] == b'\x00\x00\x00\x01'
+            or (len(tail) < 4 and tail == b'\x00\x00\x00\x01'[:len(tail)])):
+        # 头后面不是起始码：可能还是解析没对齐，保守起见多等一批
+        if len(buf) < i + 32:
+            return buf, False
+    return buf[:i] + buf[i + 22:], True
+
+
 def decode_stream(sock, on_frame, stop_evt, on_first=None, target_width=0):
     """从裸 HEVC 字节流解码；返回 (帧数, 字节数)
 
@@ -104,6 +162,7 @@ def decode_stream(sock, on_frame, stop_evt, on_first=None, target_width=0):
     except Exception:
         pass
     buf = b''
+    hdr_done = False
     frames = nbytes = 0
     while not stop_evt.is_set():
         data = sock.recv(1 << 16)
@@ -111,6 +170,8 @@ def decode_stream(sock, on_frame, stop_evt, on_first=None, target_width=0):
             break
         nbytes += len(data)
         buf += data
+        if not hdr_done:
+            buf, hdr_done = strip_live_header(buf)
         aus, buf = split_aus(buf)
         for au in aus:
             for frame in dec.decode(av.Packet(au)):
@@ -314,23 +375,24 @@ class LiveDecoder(threading.Thread):
 
         w = int(self.width)
         h = int(round(w * SRC_ASPECT)) & ~1      # NV12 要求偶数高度
+        dec, scale = gst_live_elements()
         pipe = Gst.parse_launch(
             # 沿用 appsrc 的累积字节 PTS（"码率 × 字节"≈时长，压帧后仍单调），
             # 再配合首帧的绝对 PTS / 字节数换算出每帧的录制轴时刻
             'appsrc name=src is-live=true format=time do-timestamp=false '
             'block=true max-bytes=4194304 '
             'caps=video/x-h265,stream-format=byte-stream,alignment=au ! '
-            'h265parse ! nvh265dec ! videoscale ! '
+            'h265parse ! %s ! %s ! '
             'video/x-raw,format=NV12,width=%d,height=%d ! '
             'appsink name=sink max-buffers=1 drop=true sync=false '
-            'emit-signals=false' % (w, h))
+            'emit-signals=false' % (dec, scale, w, h))
         src = pipe.get_by_name('src')
         sink = pipe.get_by_name('sink')
         bus = pipe.get_bus()
         if pipe.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             pipe.set_state(Gst.State.NULL)
-            raise RuntimeError('nvh265dec 启动失败')
-        self.decoder = 'nvdec'
+            raise RuntimeError('%s 启动失败' % dec)
+        self.decoder = 'nvdec' if dec == 'nvh265dec' else 'mpp'
 
         stop = self.stop_evt
         sock = self.sock
@@ -421,8 +483,20 @@ class LiveDecoder(threading.Thread):
                             print('NVDEC 直播错误: %s' % err.message)
                     return
         finally:
+            # 顺序很关键：先停推送线程，等它退出，再拆管线。
+            # 反过来的话 pipe.set_state(NULL) 会等 appsrc 清空，
+            # 而 pt 还在往那个 appsrc 推数据 → 互相等（实测进程
+            # 退出时报 "terminate called without an active exception"
+            # 然后 Aborted）。stop_evt 由 LiveDecoder.stop() 置位。
+            stop.set()
+            # pusher 卡在阻塞的 sock.recv 上，置 stop_evt 它看不见：
+            # shutdown 让它立刻返回 b'' 从而跳出循环。
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            pt.join(timeout=1.5)
             pipe.set_state(Gst.State.NULL)
-            pt.join(timeout=0.5)
 
     def run(self):
         try:

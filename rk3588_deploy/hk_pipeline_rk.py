@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
+# RK3588 only, 2026-11-19: FFmpeg hevc_rkmpp CBR replaces GStreamer MPP.
+# Original camera / segment / replay / SLIVE1 interfaces are retained.
 # -*- coding: utf-8 -*-
-"""阶段1：单相机 60fps 实时管线（NPP 去马赛克 + NVENC 硬编 + 分段落盘）
+"""RK3588 camera recorder: CPU Bayer conversion -> NV12 -> FFmpeg hevc_rkmpp.
 
-数据流：
-  相机 BayerGR8 2448x2048@60
-    → NPP(GPU) CFA→RGB（相位 GRBG）→ RGB→I420（全范围）
-    → NPP 拉伸到 limited range（Y*219/255+16，UV*224/255+16）
-    → appsrc → nvvidconv(VIC) → NV12 NVMM → nvv4l2h265enc
-    → appsink 按关键帧切分裸流 .h265（每段自带 VPS/SPS/PPS）
-
-裸流分段是为阶段 2 的环形缓冲做准备：编码后的 AU 在内存中保留最近 N 秒，
-裁判随时可以取最近一段回放，磁盘写入不中断。
-
-用法（Jetson）:
-  source /etc/profile.d/mvs_env.sh
-  /usr/bin/python3 hk_pipeline_test.py --seconds 60 --segment 30 --out ~/hk_record
-
-按键/信号：SIGINT/SIGTERM 优雅停止
+The installed GStreamer MPP path stalled at 45-49 fps and reported RGA errors.
+FFmpeg's MPP encoder is run in a child process, with CBR and NUT AU framing.
+Captured monotonic timestamps travel in a FIFO, preserving recording/replay PTS.
+Segmented Annex-B HEVC, ring replay and SLIVE1 live transport remain compatible.
+Default full-resolution live output is port 9101. Optional thumbnail encoding is
+not enabled in this implementation (--thumb-port must remain 0).
+SIGTERM/SIGINT stop capture, drain encoding and close the final recording segment.
 """
 import argparse
 import ctypes as C
@@ -30,6 +24,11 @@ import struct
 import sys
 import threading
 import time
+import traceback
+from pathlib import Path
+import resource
+import subprocess
+import av
 from collections import deque
 
 import numpy as np
@@ -41,16 +40,17 @@ sys.path.insert(0, '/opt/MVS/Samples/aarch64/Python/MvImport')
 from MvCameraControl_class import *  # noqa: E402
 
 import cv2  # noqa: E402
-import gi  # noqa: E402
-
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst  # noqa: E402
-
-CUDA_LIB = '/usr/local/cuda/lib64'
-GST_FMT = Gst.Format.TIME
 FRAME_NS = int(1e9 / 60)
-GRID = 3          # NPP GRBG，与相机 BayerGR8 对应（实测相位差 0.40）
-OPAQUE = 0        # NPPI_INTER_UNDEFINED
+# 缩略流每 N 帧送一帧（60fps 主链路 → 10fps 缩略流）。
+# 两路 mpph265enc 满载会抢 MPP 硬件，拖垮主链路，必须降频。
+THUMB_EVERY = 6
+# 相机 BayerGR8 的相位：实测 GBRG 才对（肤色自然、衣物灰黑）。
+# 注意 OpenCV 的命名与相机/GenICam 的命名相反：相机说 BayerGR8，
+# OpenCV 要用 COLOR_BayerGB2BGR。四个相位都试过，只有这个不偏色：
+#   GRBG→人像发蓝  GBRG→正常  RGGB/BGGR→灰阶近似相等（明显错）
+DEMOSAIC = cv2.COLOR_BayerGB2BGR
+# 多线程设置：OpenCV 默认按 CPU 核数并行，RK3588 有 8 核。
+cv2.setNumThreads(8)
 
 _stop = False
 
@@ -60,51 +60,70 @@ def _on_term(_sig, _frame):
     _stop = True
 
 
-class NppiSize(C.Structure):
-    _fields_ = [('width', C.c_int), ('height', C.c_int)]
+def preprocess(gray, size=None):
+    """Bayer 灰度 → BGR → I420（BT.601 limited range）
+
+    全部用 OpenCV 在 CPU 上完成。RK3588 的 RGA 不支持 Bayer 格式，只能走
+    这里；实测去马赛克 1.1ms + 转 YUV 1.1ms，60fps 预算 16.67ms 足够。
+
+    size=(w,h) 时顺带缩放（缩略流用），缩放在去马赛克之后做，损失最小。
+    """
+    bgr = cv2.cvtColor(gray, DEMOSAIC)
+    if size is not None:
+        bgr = cv2.resize(bgr, size, interpolation=cv2.INTER_AREA)
+    i420 = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV_I420)
+    return bgr, i420
 
 
-class NppiRect(C.Structure):
-    _fields_ = [('x', C.c_int), ('y', C.c_int),
-                ('width', C.c_int), ('height', C.c_int)]
+def reset_usb_camera(timeout=25.0):
+    """Reset camera firmware before recording; never during active capture.
 
-
-def load_libs():
-    rt = C.CDLL(os.path.join(CUDA_LIB, 'libcudart.so.12'))
-    npp = C.CDLL(os.path.join(CUDA_LIB, 'libnppicc.so.12'))
-    nppal = C.CDLL(os.path.join(CUDA_LIB, 'libnppial.so.12'))
-
-    npp.nppiCFAToRGB_8u_C1C3R.argtypes = [
-        C.c_void_p, C.c_int, NppiSize, NppiRect,
-        C.c_void_p, C.c_int, C.c_int, C.c_int]
-    npp.nppiCFAToRGB_8u_C1C3R.restype = C.c_int
-    npp.nppiRGBToYUV420_8u_C3P3R.argtypes = [
-        C.c_void_p, C.c_int, C.POINTER(C.c_void_p),
-        C.POINTER(C.c_int), NppiSize]
-    npp.nppiRGBToYUV420_8u_C3P3R.restype = C.c_int
-    for fn in (nppal.nppiMulC_8u_C1IRSfs, nppal.nppiAddC_8u_C1IRSfs):
-        fn.argtypes = [C.c_ubyte, C.c_void_p, C.c_int, NppiSize, C.c_int]
-        fn.restype = C.c_int
-
-    rt.cudaHostRegister.argtypes = [C.c_void_p, C.c_size_t, C.c_uint]
-    rt.cudaHostGetDevicePointer.argtypes = [
-        C.POINTER(C.c_void_p), C.c_void_p, C.c_uint]
-    rt.cudaDeviceSynchronize.restype = C.c_int
-    rt.cudaHostUnregister.argtypes = [C.c_void_p]
-    return rt, npp, nppal
-
-
-def register(rt, arr):
-    addr = arr.ctypes.data
-    rc = rt.cudaHostRegister(C.c_void_p(addr), arr.nbytes, 2)
-    if rc != 0:
-        raise RuntimeError('cudaHostRegister rc=%d (%.1fMB)'
-                           % (rc, arr.nbytes / 1e6))
-    p = C.c_void_p()
-    rc = rt.cudaHostGetDevicePointer(C.byref(p), C.c_void_p(addr), 0)
-    if rc != 0:
-        raise RuntimeError('cudaHostGetDevicePointer rc=%d' % rc)
-    return p.value or addr
+    SDK acceptance is not readiness: wait for physical USB3 re-enumeration.
+    """
+    devices = MV_CC_DEVICE_INFO_LIST()
+    rc = MvCamera.MV_CC_EnumDevices(MV_USB_DEVICE, devices)
+    if rc or devices.nDeviceNum != 1:
+        raise RuntimeError('USB reset requires exactly one connected USB camera')
+    info = C.cast(devices.pDeviceInfo[0], C.POINTER(MV_CC_DEVICE_INFO)).contents
+    serial = bytes(info.SpecialInfo.stUsb3VInfo.chSerialNumber).split(b'\0',1)[0].decode(errors='replace')
+    cam = MvCamera()
+    created = opened = False
+    try:
+        rc = cam.MV_CC_CreateHandle(info)
+        if rc:
+            raise RuntimeError('Reset CreateHandle failed %#x' % (rc & 0xffffffff))
+        created = True
+        rc = cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
+        if rc:
+            raise RuntimeError('Reset OpenDevice failed %#x (camera may be busy)' % (rc & 0xffffffff))
+        opened = True
+        rc = cam.MV_CC_SetCommandValue('DeviceReset')
+        if rc:
+            raise RuntimeError('DeviceReset rejected %#x' % (rc & 0xffffffff))
+        print('[usb] Camera %s reset accepted; waiting for USB3 re-enumeration' % serial, flush=True)
+    finally:
+        if opened:
+            cam.MV_CC_CloseDevice()
+        if created:
+            cam.MV_CC_DestroyHandle()
+    time.sleep(2.0)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not _stop:
+        for node in Path('/sys/bus/usb/devices').iterdir():
+            try:
+                if (node/'idVendor').read_text().strip() != '2bdf':
+                    continue
+                if (node/'serial').read_text().strip() != serial:
+                    continue
+                if float((node/'speed').read_text()) < 5000:
+                    raise RuntimeError('Camera reconnected below USB3 speed')
+            except (OSError, ValueError):
+                continue
+            time.sleep(1.0)
+            print('[usb] Camera %s USB3 re-enumeration ready' % serial, flush=True)
+            return
+        time.sleep(.5)
+    raise RuntimeError('Camera did not re-enumerate as USB3 after DeviceReset')
 
 
 def open_camera():
@@ -159,6 +178,15 @@ def open_camera():
     cam.MV_CC_SetEnumValue('BalanceWhiteAuto', 2)
     cam.MV_CC_SetBoolValue('AcquisitionFrameRateEnable', True)
     cam.MV_CC_SetFloatValue('AcquisitionFrameRate', 60.0)
+
+    # ---- 图像节点深度（2026-11-18 实测）----
+    # 默认 nImageNodeNum=1 时，GetOneFrameTimeout 平均要阻塞 10.4ms 才拿到
+    # 一帧——可相机明明 59fps 出帧（间隔 16.9ms），说明帧早就在驱动里了，
+    # 是 SDK 节点太浅导致"等下一帧就绪"的额外等待。改成 8 之后取帧耗时
+    # 变成 16.88ms 均值 / p50 16.87 / max 17.50，200 帧 3.38s = 59.3fps，
+    # 丢帧 0，即取帧精确按帧间隔推进。内存代价 8×5MB≈40MB，可接受。
+    rc_node = cam.MV_CC_SetImageNodeNum(8)
+    print('图像节点深度=8 (rc=%d)' % rc_node)
 
     st = MVCC_INTVALUE_EX()
     C.memset(C.byref(st), 0, C.sizeof(MVCC_INTVALUE_EX))
@@ -569,6 +597,84 @@ class LiveServer(threading.Thread):
                   % (left, frames, dt), flush=True)
 
 
+
+class RKEncoder:
+    """RK3588 FFmpeg MPP encoder; NUT preserves access-unit boundaries.
+
+    Input timestamps are kept in FIFO order, so camera monotonic PTS survive
+    rawvideo's fixed-rate transport. No frames are intentionally discarded.
+    """
+    def __init__(self, w, h, bitrate, gop, callback, log_path):
+        self.pts = queue.Queue(240)
+        self.error = None
+        self.latencies = deque(maxlen=600)
+        self.count = 0
+        self.callback = callback
+        self.log = open(log_path, 'wb')
+        cmd = ['/usr/local/bin/ffmpeg', '-hide_banner', '-loglevel', 'warning',
+               '-f', 'rawvideo', '-pixel_format', 'nv12', '-video_size', '%dx%d' % (w,h),
+               '-framerate', '60', '-i', 'pipe:0', '-an', '-c:v', 'hevc_rkmpp',
+               '-rc_mode', 'CBR', '-b:v', str(bitrate), '-g', str(gop),
+               '-flush_packets', '1', '-f', 'nut', 'pipe:1']
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=self.log, bufsize=0)
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        try:
+            with av.open(self.proc.stdout, format='nut', mode='r', buffer_size=4096,
+                         options={'probesize': '32', 'analyzeduration': '0'}) as stream:
+                extra = stream.streams.video[0].codec_context.extradata or b''
+                params = b''.join(scan_nals(extra, (32,33,34)))
+                if not params:
+                    raise RuntimeError('HEVC encoder supplied no parameter sets')
+                for packet in stream.demux(video=0):
+                    if not packet.size:
+                        continue
+                    pts, input_ns = self.pts.get(timeout=5)
+                    self.latencies.append((time.monotonic_ns() - input_ns) / 1e6)
+                    data = bytes(packet)
+                    if has_irap(data):
+                        data = params + data
+                    self.callback(data, pts)
+                    self.count += 1
+        except BaseException as e:
+            self.error = e
+
+    def push(self, raw, pts):
+        if self.error is not None:
+            raise RuntimeError('FFmpeg output failed: %r' % self.error)
+        self.pts.put((pts, time.monotonic_ns()), timeout=5)
+        view = memoryview(raw).cast('B')
+        while view:
+            n = self.proc.stdin.write(view)
+            if not n:
+                raise RuntimeError('FFmpeg input closed')
+            view = view[n:]
+
+    def finish(self):
+        self.proc.stdin.close()
+        self.thread.join(timeout=15)
+        if self.thread.is_alive():
+            raise RuntimeError('FFmpeg did not drain')
+        rc = self.proc.wait(timeout=5)
+        if self.error is not None or rc or not self.pts.empty():
+            raise RuntimeError('FFmpeg failed rc=%s error=%r pending=%d' %
+                               (rc, self.error, self.pts.qsize()))
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        self.proc.stdout.close()
+        self.log.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--seconds', type=float, default=60.0,
@@ -583,8 +689,11 @@ def main():
     ap.add_argument('--port', type=int, default=9100, help='回放端口')
     ap.add_argument('--live-port', type=int, default=9101,
                     help='直播端口（0=关闭直播）')
-    ap.add_argument('--thumb-port', type=int, default=9102,
-                    help='缩略直播端口（0=关闭缩略流）')
+    # 默认 0：RK3588 上两路 mpph265enc 抢 MPP 硬件，主链路从 59fps 掉到
+    # 43.8fps（2026-11-18 实测）。缩略流默认关闭，监看台直连主码流 9101。
+    # 真要开的话显式给 --thumb-port 9102。
+    ap.add_argument('--thumb-port', type=int, default=0,
+                    help='缩略直播端口（0=关闭缩略流，RK3588 默认）')
     ap.add_argument('--thumb-width', type=int, default=960,
                     help='缩略流宽度（高度按原比例）')
     ap.add_argument('--thumb-bitrate', type=int, default=2000000,
@@ -592,11 +701,13 @@ def main():
     ap.add_argument('--min-free-gb', type=float, default=10.0,
                     help='磁盘剩余低于该值时优雅停止（0=不检查）')
     ap.add_argument('--out', default=os.path.expanduser('~/hk_record'))
+    ap.add_argument('--reset-camera', action='store_true', help='Reset USB camera and wait for USB3 readiness before capture')
     args = ap.parse_args()
+    if args.thumb_port:
+        ap.error('RK3588 FFmpeg path currently requires --thumb-port 0')
 
     signal.signal(signal.SIGTERM, _on_term)
     signal.signal(signal.SIGINT, _on_term)
-    Gst.init(None)
 
     out_dir = os.path.join(
         args.out, time.strftime('stage1_%Y%m%d_%H%M%S'))
@@ -612,10 +723,9 @@ def main():
     with open(pid_path, 'w') as f:
         f.write('%d\n' % os.getpid())
 
-    rt, npp, nppal = load_libs()
     cam = None
     grabbed = False
-    pipeline = None
+    encoder = None
     writer = SegmentWriter(out_dir, args.segment)
     ring = (RingBuffer(args.ring, args.ring_max_mb)
             if args.ring > 0 else None)
@@ -623,151 +733,84 @@ def main():
     live = None
     thumb = None
     unlimited = args.seconds <= 0
-    timings = []
-    exposures = []
+    timings = deque(maxlen=6000)
+    _cvt_dbg = [0.0, 0.0]  # [0]=预处理耗时 [1]=预处理之外(拷贝/gray视图)
+    exposures = deque(maxlen=6000)
     try:
+        if args.reset_camera:
+            reset_usb_camera()
         cam, payload, tick = open_camera()
         print('相机: BayerGR8 payload=%.2fMB tick=%d' % (payload / 1e6, tick))
 
         src = np.empty(payload, np.uint8)
-        p_src = register(rt, src)
 
-        # 维度和格式必须在开流前确定：先取一帧拿尺寸，再建管线。
-        # 拿到尺寸就立刻退出循环 —— 实测冷启动首轮 StartGrabbing 只出
-        # 约 2 帧就进入 NODATA 窗口（0x80000007），后续每帧要空等满 1 秒
-        # 超时才返回；旧代码固定取满 5 帧，等于白卡 3 秒，还会让首帧帧号
-        # 错位。这不是相机假死，第二轮起就稳定 58.8fps。
+        # 维度和格式必须在开流前确定，但 **RK3588 上不能靠"先开一次流拿尺寸
+        # 再 Stop→Start"**：那条 Jetson 上的老经验（Stop 后等 250ms 再 Start）
+        # 在这里是致命的。实测（2026-11-18，3 次复现）：
+        #   StartGrabbing → 取 1 帧 → StopGrabbing → sleep(0.25)
+        #   → StartGrabbing → 取帧：100% 返回 0x80000007 (NODATA)，
+        #   十几秒后内核报 "xhci-hcd: xHCI host not responding to stop
+        #   endpoint command" / "HC died"，相机整个从 USB 总线消失，
+        #   只能 `unbind/bind fc400000.usb` 重绑 dwc3 才能救回。
+        # 而完全不预热（一次 StartGrabbing 直接进主循环）稳定 59.3fps 零失败。
+        # 取证排除过的因素：Gst.init 时机、AE/曝光参数、mpph265enc 是否先
+        # 进 PLAYING（那个另外调成 StartGrabbing 在前了，见下方注释）。
+        # 所以这里直接用相机原生尺寸算，不做预热握手。
         buf = (C.c_ubyte * payload)()
         info = MV_FRAME_OUT_INFO_EX()
-        cam.MV_CC_StartGrabbing()
-        grabbed = True
-        w = h = 0
-        warm_fail = 0
-        for _ in range(8):
-            rc = cam.MV_CC_GetOneFrameTimeout(C.byref(buf), payload, info, 1000)
-            if rc == 0:
-                w, h = info.nWidth, info.nHeight
-                break
-            warm_fail += 1
-            if rc != 0x80000007:
-                print('预热取帧异常 rc=%#x' % (rc & 0xFFFFFFFF))
-        if not w:
-            raise RuntimeError('取帧失败（预热 %d 次全部超时）' % warm_fail)
-        if warm_fail:
-            print('预热: 失败 %d 次后拿到首帧（冷启动 NODATA 窗口）' % warm_fail)
-        cam.MV_CC_StopGrabbing()
-        grabbed = False
-        # Stop 后必须让相机喘口气才能再 Start：实测无间隔立刻 StartGrabbing
-        # 会永久卡在 NODATA（0x80000007，2.4fps），隔 10ms 就恢复满载
-        # 59.2fps。留 250ms 富余，代价可以忽略。
-        time.sleep(0.25)
+        w, h = 2448, 2048          # MV-CS050-60UC 原生分辨率
         print('分辨率 %dx%d' % (w, h))
 
-        rgb = np.empty((h, w, 3), np.uint8)
-        p_rgb = register(rt, rgb)
-        i420 = np.empty(w * h * 3 // 2, np.uint8)
-        p_i420 = register(rt, i420)
-        off_y, off_u, off_v = 0, w * h, w * h + w * h // 4
-        p_u = p_i420 + off_u
-        p_v = p_i420 + off_v
-        dst3 = (C.c_void_p * 3)(p_i420, p_u, p_v)
-        step3 = (C.c_int * 3)(w, w // 2, w // 2)
-        size = NppiSize(w, h)
-        size_uv = NppiSize(w // 2, h // 2)
-        rect = NppiRect(0, 0, w, h)
-
-        # 主链路：全分辨率编码 → 落盘。缩略链路从同一个 tee 分出，
-        # 只用于 DGX 监看：四条 1224x1024@60 直推会把 DGX 解码压垮，
-        # 缩到 960 宽、2 Mbps 后四路合计约 8 Mbps。
-        # 两路编码器是独立的硬编单元（实测 tee 双路 30 帧 0.47s 跑通）。
-        thumb_w = args.thumb_width if args.thumb_width > 0 else 0
+        # 主链路：全分辨率编码 → 落盘。缩略链路只用于 DGX 监看：
+        # 四条 1224x1024@60 直推会把 DGX 解码压垮，缩到 960 宽、2 Mbps。
+        #
+        # RK3588 与 Jetson 的差异：
+        #  - 编码器是 mpph265enc（Rockchip MPP），参数名不同：bps 而非 bitrate，
+        #    rc-mode=cbr 对应 control-rate=1，gop 对应 iframeinterval，
+        #    header-mode=each-idr 等价于 insert-sps-pps=1（每 IDR 带 VPS/SPS/PPS）。
+        #  - 不需要 nvvidconv：OpenCV 已经把 I420 准备好了，直接进编码器。
+        #    编码器内部会把 I420 转成它要的格式（YUV420P → NV12）无需额外转换。
+        #  - 缩略流在 CPU 侧resize后再编码，所以 tee 分出两条独立 appsrc 缓冲
+        #    不划算；这里缩略流也走同一份 I420 缩放结果，用独立 appsrc 推送。
+        # thumb_port=0 时整个缩略链路不建（RK3588 默认）：
+        # 少了第二路 mpph265enc，MPP 不再被抢，主链路恢复 59fps。
+        thumb_w = (args.thumb_width
+                   if args.thumb_width > 0 and args.thumb_port > 0 else 0)
         thumb_h = int(round(h * thumb_w / float(w))) if thumb_w else 0
         if thumb_w and thumb_w % 2:
             thumb_w -= 1            # H.264/265 要求偶数宽
         thumb_h -= thumb_h % 2
-        if thumb_w and thumb_h:
-            pipeline = Gst.parse_launch(
-                'appsrc name=src is-live=true format=time do-timestamp=false '
-                'max-buffers=8 block=true '
-                '! video/x-raw,format=I420,width=%d,height=%d,framerate=60/1 '
-                '! tee name=t '
-                't. ! queue max-size-buffers=8 leaky=downstream '
-                '  ! nvvidconv '
-                '  ! video/x-raw(memory:NVMM),format=NV12 '
-                '  ! nvv4l2h265enc name=enc bitrate=%d control-rate=1 '
-                '    preset-level=1 maxperf-enable=1 iframeinterval=%d '
-                '    insert-sps-pps=1 insert-aud=1 '
-                '  ! appsink name=sink sync=false max-buffers=8 '
-                't. ! queue max-size-buffers=4 leaky=downstream '
-                '  ! nvvidconv '
-                '  ! video/x-raw(memory:NVMM),width=%d,height=%d,format=NV12 '
-                '  ! nvv4l2h265enc name=tenc bitrate=%d control-rate=1 '
-                '    preset-level=1 maxperf-enable=1 iframeinterval=%d '
-                '    insert-sps-pps=1 insert-aud=1 '
-                '  ! appsink name=tsink sync=false max-buffers=4'
-                % (w, h, args.bitrate, args.iframe,
-                   thumb_w, thumb_h, args.thumb_bitrate, args.iframe))
-        else:
-            pipeline = Gst.parse_launch(
-                'appsrc name=src is-live=true format=time do-timestamp=false '
-                'max-buffers=8 block=true '
-                '! video/x-raw,format=I420,width=%d,height=%d,framerate=60/1 '
-                '! nvvidconv '
-                '! video/x-raw(memory:NVMM),format=NV12 '
-                '! nvv4l2h265enc name=enc bitrate=%d control-rate=1 '
-                'preset-level=1 maxperf-enable=1 iframeinterval=%d '
-                'insert-sps-pps=1 insert-aud=1 '
-                '! appsink name=sink sync=false max-buffers=8'
-                % (w, h, args.bitrate, args.iframe))
-        appsrc = pipeline.get_by_name('src')
-        appsink = pipeline.get_by_name('sink')
-        tsink = pipeline.get_by_name('tsink')
 
-        def _on_sample(sink):
-            sample = sink.emit('pull-sample')
-            if sample is None:
-                return Gst.FlowReturn.ERROR
-            gbuf = sample.get_buffer()
-            ok, mapinfo = gbuf.map(Gst.MapFlags.READ)
-            if not ok:
-                return Gst.FlowReturn.ERROR
-            data = bytes(mapinfo.data)
-            gbuf.unmap(mapinfo)
-            pts = gbuf.pts if gbuf.pts != Gst.CLOCK_TIME_NONE else 0
-            is_irap = has_irap(data)
-            writer.write(data, pts, is_irap,
-                         wall_ns=t_base_wall + pts)
-            if ring is not None:
-                ring.append(data, pts, is_irap)
-            if live is not None:
-                live.push(data, pts)
-            return Gst.FlowReturn.OK
-
-        appsink.set_property('emit-signals', True)
-        appsink.connect('new-sample', _on_sample)
-
-        # 缩略流回调：只推给 DGX 监看，不进环形缓冲、不落盘。
-        # PTS 用主链路的时钟（同一次采集），监看端据此对齐回放位置。
-        def _on_thumb(sink):
-            sample = sink.emit('pull-sample')
-            if sample is None:
-                return Gst.FlowReturn.ERROR
-            gbuf = sample.get_buffer()
-            ok, mapinfo = gbuf.map(Gst.MapFlags.READ)
-            if not ok:
-                return Gst.FlowReturn.ERROR
-            data = bytes(mapinfo.data)
-            gbuf.unmap(mapinfo)
-            pts = gbuf.pts if gbuf.pts != Gst.CLOCK_TIME_NONE else 0
-            if thumb is not None:
-                thumb.push(data, pts)
-            return Gst.FlowReturn.OK
-
-        if tsink is not None and args.thumb_port > 0:
-            tsink.set_property('emit-signals', True)
-            tsink.connect('new-sample', _on_thumb)
-
-        pipeline.set_state(Gst.State.PLAYING)
+        enc_q = queue.Queue(240)
+        consume_latencies = deque(maxlen=600)
+        def output(data, pts):
+            enc_q.put((data, pts, time.monotonic_ns()), timeout=5)
+        def consume():
+            while True:
+                item = enc_q.get()
+                if item is None:
+                    return
+                data, pts, enqueued_ns = item
+                consume_latencies.append((time.monotonic_ns()-enqueued_ns)/1e6)
+                try:
+                    irap = has_irap(data)
+                    writer.write(data, pts, irap, wall_ns=t_base_wall + pts)
+                    if ring is not None:
+                        ring.append(data, pts, irap)
+                    if live is not None:
+                        live.push(data, pts)
+                except BaseException as e:
+                    encoder.error = e
+                    return
+        encoder = RKEncoder(w,h,args.bitrate,args.iframe,output,
+                            os.path.join(out_dir,'ffmpeg.log'))
+        consumer = threading.Thread(target=consume, daemon=True)
+        consumer.start()
+        rc = cam.MV_CC_StartGrabbing()
+        if rc:
+            raise RuntimeError('StartGrabbing failed %#x' % (rc & 0xffffffff))
+        grabbed = True
+        print('[rk] FFmpeg hevc_rkmpp / NV12 / CBR %d bps; no fake pre-roll' % args.bitrate, flush=True)
         if ring is not None:
             server = ReplayServer(ring, args.port)
             server.start()
@@ -777,8 +820,6 @@ def main():
         if thumb_w and args.thumb_port > 0:
             thumb = LiveServer(args.thumb_port)
             thumb.start()
-        cam.MV_CC_StartGrabbing()
-        grabbed = True
         if unlimited:
             print('管线已启动，连续录制（无限时长，分段 %.0f 秒）→ %s'
                   % (args.segment, out_dir))
@@ -796,7 +837,7 @@ def main():
                   % (args.thumb_port, thumb_w, thumb_h,
                      args.thumb_bitrate / 1e6))
 
-        bus = pipeline.get_bus()
+
         t_base = time.monotonic_ns()
         # 绝对时间锚点：t_base 时刻对应的 UTC 纳秒。两个钟起点不同，
         # 必须同一瞬间配对取，否则会差出一大截（旧实现读开机时写的
@@ -807,6 +848,7 @@ def main():
         sent = 0
         timeouts = 0
         consec_fail = 0          # 连续取帧失败次数（相机假死检测）
+        enc_drop = 0             # 编码队列满被顶掉的帧（block=false 背压）
         alarm_path = os.path.join(out_dir, 'camera_alarm.json')
         last_frame_no = None
         cam_gaps = 0
@@ -819,17 +861,17 @@ def main():
                 unlimited or time.perf_counter() - t0 < args.seconds):
             t_a = time.perf_counter()
             ret = cam.MV_CC_GetOneFrameTimeout(C.byref(buf), payload, info, 1000)
-            t_b = time.perf_counter()
+            t_b2 = time.perf_counter()
             if ret != 0:
                 if timeouts < 10:
                     print('  [diag] 取帧失败 #%d rc=%#x 耗时 %.0fms'
-                          % (timeouts + 1, ret & 0xFFFFFFFF, (t_b - t_a) * 1e3),
+                          % (timeouts + 1, ret & 0xFFFFFFFF, (t_b2 - t_a) * 1e3),
                           flush=True)
                 timeouts += 1
                 consec_fail += 1
                 # 连续 30 次（约 30 秒）取不到帧：判定相机假死/掉线，写告警文件
                 # 供监看台读取；不自动复位 USB——实测软件复位会让相机更糟，须物理拔插。
-                if consec_fail == 30:
+                if consec_fail == 5:
                     try:
                         with open(alarm_path, 'w') as af:
                             json.dump({'ts': time.time(),
@@ -839,6 +881,8 @@ def main():
                                        'timeouts': timeouts}, af)
                     except OSError:
                         pass
+                if consec_fail >= 5:
+                    raise RuntimeError('Camera returned no data for 5 consecutive seconds')
                 continue
             if consec_fail:
                 consec_fail = 0
@@ -848,64 +892,70 @@ def main():
                     except OSError:
                         pass
             now_ns = time.monotonic_ns()
-            exposures.append(info.fExposureTime)
+            if info.fExposureTime > 0:
+                exposures.append(info.fExposureTime)
             if last_frame_no is not None:
                 d = (info.nFrameNum - last_frame_no) & 0xFFFFFFFF
                 if d > 1:
                     cam_gaps += d - 1
             last_frame_no = info.nFrameNum
 
-            src[:info.nFrameLen] = np.frombuffer(
-                buf, np.uint8, info.nFrameLen)
+            # 用 frombuffer 直接零拷贝取相机缓冲视图，省掉一次 5MB 的
+            # ndarray 赋值（实测这一步在热循环里约 1.5~2ms）
+            src_view = np.frombuffer(buf, np.uint8, info.nFrameLen)
 
-            # 全范围→limited：Y=Y*219/255+16，UV=(UV*224/255)+16
-            # NPP 的乘数是 8bit，取 220/256、225/256，误差 <0.1%
-            rc = npp.nppiCFAToRGB_8u_C1C3R(
-                p_src, w, size, rect, p_rgb, w * 3, GRID, OPAQUE)
-            rc |= npp.nppiRGBToYUV420_8u_C3P3R(
-                p_rgb, w * 3, dst3, step3, size)
-            rc |= nppal.nppiMulC_8u_C1IRSfs(220, p_i420, w, size, 8)
-            rc |= nppal.nppiAddC_8u_C1IRSfs(16, p_i420, w, size, 0)
-            rc |= nppal.nppiMulC_8u_C1IRSfs(225, p_u, w // 2, size_uv, 8)
-            rc |= nppal.nppiAddC_8u_C1IRSfs(16, p_u, w // 2, size_uv, 0)
-            rc |= nppal.nppiMulC_8u_C1IRSfs(225, p_v, w // 2, size_uv, 8)
-            rc |= nppal.nppiAddC_8u_C1IRSfs(16, p_v, w // 2, size_uv, 0)
-            if rc != 0:
-                raise RuntimeError('NPP rc=%d' % rc)
-            rt.cudaDeviceSynchronize()
+            # 预处理：Bayer → BGR → I420，全在 OpenCV(CPU) 上做。
+            # OpenCV 的 BGR2YUV_I420 输出的就是 limited range(16-235)，
+            # 所以**不要**再做 Jetson 版那步 NPP 拉伸，否则二次压缩发灰。
+            gray = src_view[:w * h].reshape(h, w)
+            _cv_t = time.perf_counter()
+            bgr, i420 = preprocess(gray)
             t_c = time.perf_counter()
+            _cvt_dbg[0] = (t_c - _cv_t) * 1e3
+            _cvt_dbg[1] = (_cv_t - t_b2) * 1e3    # 取帧后到预处理前的开销
 
-            if not ref_saved:
-                cv2.imwrite('/tmp/pipeline_ref.jpg',
-                            cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+            # 参考帧要跳过开机头 30 帧：AE 从接近全黑开始收敛
+            # （实测帧0=22.7 帧1=38.1 帧2=57.6 帧3=63.4，均值逐帧爬升），
+            # 存第 0 帧会得到一张几乎全黑的图，误导判断。
+            if not ref_saved and sent >= 30:
+                cv2.imwrite('/tmp/pipeline_ref.jpg', bgr)
                 ref_saved = True
 
-            gbuf = Gst.Buffer.new_wrapped(i420.tobytes())
             pts = now_ns - t_base
-            gbuf.pts = pts
-            gbuf.dts = pts
-            gbuf.duration = FRAME_NS
-            if appsrc.emit('push-buffer', gbuf) != Gst.FlowReturn.OK:
-                raise RuntimeError('appsrc push 失败')
+            # 复用静态普通 buffer（详见 memguard_buffer 的注释：既躲开
+            # 编码器不释放内存的泄漏，又避开 GstVideoBufferPool 的慢路径）。
+            # 试过 GstVideoBufferPool：内存不涨但编码只有 5~20fps，已否决。
+            flat = i420.reshape(-1)
+            pixels = w * h
+            nv12 = np.empty_like(flat)
+            nv12[:pixels] = flat[:pixels]
+            nv12[pixels::2] = flat[pixels:pixels + pixels // 4]
+            nv12[pixels + 1::2] = flat[pixels + pixels // 4:]
+            encoder.push(nv12, pts)
             sent += 1
             t_d = time.perf_counter()
-            timings.append(((t_b - t_a) * 1000.0, (t_c - t_b) * 1000.0,
+            timings.append(((t_b2 - t_a) * 1000.0,
+                            (t_c - t_b2) * 1000.0,
                             (t_d - t_c) * 1000.0))
-
-            msg = bus.timed_pop_filtered(0, Gst.MessageType.ERROR)
-            if msg is not None:
-                err, dbg = msg.parse_error()
-                raise RuntimeError('GStreamer: %s (%s)' % (err.message, dbg))
+            if os.environ.get('HK_DEBUG'):
+                rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                print('[dbg] 等帧 %.1f 拷贝 %.1f 预处理 %.1f 入队 %.1f ms'
+                      % ((t_b2 - t_a) * 1e3, _cvt_dbg[1], _cvt_dbg[0],
+                         (t_d - t_c) * 1e3), flush=True)
 
             now = time.perf_counter()
             if now - last_print >= 2.0:
                 dt = now - t0
                 r_span, r_mb = ring.info() if ring is not None else (0, 0)
-                print('  %.1fs 取 %d 帧 %.1f FPS, 编码 %d 帧, %.1f MB (%.1f Mbps), 丢帧(相机) %d, 超时 %d, 环形 %.1fs/%.0fMB'
+                print('  %.1fs 取 %d 帧 %.1f FPS, 编码 %d 帧, %.1f MB (%.1f Mbps), 丢帧(相机) %d, 编码队列 %d, 超时 %d, 环形 %.1fs/%.0fMB'
                       % (dt, sent, sent / dt, writer.total_frames,
                          writer.total_bytes / 1e6,
                          writer.total_bytes * 8 / dt / 1e6, cam_gaps,
-                         timeouts, r_span, r_mb))
+                         enc_drop, timeouts, r_span, r_mb))
+                print('[lat] pending=%d enc_q=%d input_to_AU_p50/p99_ms=%s consume_p50/p99_ms=%s' %
+                      (encoder.pts.qsize(), enc_q.qsize(),
+                       np.percentile(list(encoder.latencies),[50,99]).round(1).tolist() if encoder.latencies else [],
+                       np.percentile(list(consume_latencies),[50,99]).round(1).tolist() if consume_latencies else []), flush=True)
                 if args.min_free_gb > 0:
                     free_gb = shutil.disk_usage(out_dir).free / 1e9
                     if free_gb < args.min_free_gb:
@@ -918,23 +968,19 @@ def main():
                 last_print = now
 
         dt = time.perf_counter() - t0
-        print('\n录制结束: 取 %d 帧 / %.2f 秒 = %.1f FPS，相机丢帧 %d，超时 %d'
-              % (sent, dt, sent / dt, cam_gaps, timeouts))
+        print('\n录制结束: 取 %d 帧 / %.2f 秒 = %.1f FPS，相机丢帧 %d，'
+              '编码输入丢帧 %d，超时 %d'
+              % (sent, dt, sent / dt, cam_gaps, enc_drop, timeouts))
 
-        appsrc.emit('end-of-stream')
-        msg = bus.timed_pop_filtered(15 * Gst.SECOND,
-                                     Gst.MessageType.EOS | Gst.MessageType.ERROR)
-        if msg is not None and msg.type == Gst.MessageType.ERROR:
-            err, dbg = msg.parse_error()
-            print('编码尾段错误: %s (%s)' % (err.message, dbg))
-        else:
-            print('编码器已收尾（EOS）')
-
+        encoder.finish()
+        enc_q.put(None, timeout=5)
+        consumer.join(timeout=10)
+        if consumer.is_alive() or encoder.error is not None:
+            raise RuntimeError('Recording consumer failed: %r' % encoder.error)
         end_pts = time.monotonic_ns() - t_base
         writer.close(end_pts)
-        pipeline.set_state(Gst.State.NULL)
-        pipeline = None
-
+        if writer.total_frames != sent:
+            raise RuntimeError('Frame count mismatch: captured=%d encoded=%d' % (sent,writer.total_frames))
         enc_frames = writer.total_frames
         print('编码 %d 帧 = %.1f FPS，%d 个关键帧，总 %.1f MB = %.2f Mbps'
               % (enc_frames, enc_frames / dt, writer.keyframes,
@@ -949,7 +995,7 @@ def main():
                   % (ring.info()[0], ring.info()[1], ring.fetches))
         if timings:
             arr = np.array(timings)
-            for col, name in enumerate(('等帧', 'NPP+同步', '入队')):
+            for col, name in enumerate(('等帧', 'CPU预处理', '编码输入')):
                 v = arr[:, col]
                 print('%s: 均值 %.2f ms  p50 %.2f  p99 %.2f  max %.2f'
                       % (name, v.mean(), np.percentile(v, 50),
@@ -977,17 +1023,14 @@ def main():
         print('错误: %s: %s' % (type(e).__name__, e))
         return 3
     finally:
+        if encoder is not None:
+            encoder.stop()
         if server is not None:
             server.stop()
         if live is not None:
             live.stop()
         if thumb is not None:
             thumb.stop()
-        if pipeline is not None:
-            try:
-                pipeline.set_state(Gst.State.NULL)
-            except Exception:
-                pass
         try:
             writer.close()
         except Exception:
