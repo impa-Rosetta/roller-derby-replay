@@ -41,3 +41,12 @@ node相机为独占设备：部署时先正常停止该节点录制，保留旧�
 ## 6. 故障证据
 每个场次目录含meta.jsonl、ffmpeg.log，故障有camera_alarm.json。/tmp/hk_record.log在下一次启动会覆盖，必须先复制；同时保存dmesg和系统状态。
 USB -19仅说明设备/总线在提交请求时不可用，不能单独判定是线缆或驱动。磁盘不足、编码不够快与USB停流分别诊断。
+
+## PyAV 8 管道兼容
+系统python3-av 8.1要求输入对象name为字符串，而subprocess无缓冲stdout.name为整数fd。录制程序使用EncoderPipeInput适配，保留无缓冲read，不引入BufferedReader等待造成直播延迟。新节点验收必须运行实际编码测试，不能仅检查import成功。
+
+## 本批节点有线网络注意事项
+第三台接入时已核实NetworkManager管理eth2，静态192.168.123.102/24，autoconnect=yes。本批镜像不使用Netplan；先读取已有profile，不要重复创建。
+只读检查：`nmcli -f connection.id,connection.autoconnect,ipv4.method,ipv4.addresses connection show eth2`。若地址已正确、仅未自启，打开autoconnect并在本机激活；通过同一网口SSH执行connection up可能断连，应准备本机终端或延迟执行。
+DGX访问失败可检查目标ARP条目，必要时只清理目标地址再重试，避免随意刷新正在使用的全部节点。FAILED/INCOMPLETE表示解析失败，本身不足以断言是缓存或物理故障。
+完整的现场网络文档在DGX工作日志中，包含本机敏感配置，不直接复制到共享仓库。

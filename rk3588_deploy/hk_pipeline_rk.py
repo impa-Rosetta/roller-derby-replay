@@ -598,6 +598,27 @@ class LiveServer(threading.Thread):
 
 
 
+class EncoderPipeInput:
+    """Unbuffered FFmpeg stdout adapter compatible with PyAV 8+.
+
+    FileIO.name is an integer fd; PyAV 8 requires a string name even when
+    format is explicit. Keep reads unbuffered to avoid adding live latency.
+    """
+    name = 'rk3588-encoder.nut'
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def read(self, size):
+        return self.stream.read(size)
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return False
+
+
 class RKEncoder:
     """RK3588 FFmpeg MPP encoder; NUT preserves access-unit boundaries.
 
@@ -623,7 +644,7 @@ class RKEncoder:
 
     def _read(self):
         try:
-            with av.open(self.proc.stdout, format='nut', mode='r', buffer_size=4096,
+            with av.open(EncoderPipeInput(self.proc.stdout), format='nut', mode='r', buffer_size=4096,
                          options={'probesize': '32', 'analyzeduration': '0'}) as stream:
                 extra = stream.streams.video[0].codec_context.extradata or b''
                 params = b''.join(scan_nals(extra, (32,33,34)))
