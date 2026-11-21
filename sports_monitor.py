@@ -12,7 +12,8 @@ import uuid
 
 import cv2
 
-import studio_theme as T
+import sports_theme as T
+from sports_widgets import RoundedCard,SoftButton,IconBadge,section_heading
 from studio_services_rk import fmt_hms
 from sports_replay import (Track, ReplayCoordinator, camera_catalog, grouped_sessions,
                            measure_clock, save_json)
@@ -28,7 +29,7 @@ def tc(seconds):
 class CameraSurface:
     def __init__(self, parent, app, key):
         self.app,self.key=app,key
-        self.canvas=tk.Canvas(parent,bg='#05080c',highlightthickness=1,
+        self.canvas=tk.Canvas(parent,bg=T.VIDEO_BG,highlightthickness=1,
                               highlightbackground=T.BORDER,cursor='hand2')
         self.photo=None;self.last=None;self.signature=None
         self.canvas.bind('<Button-1>',lambda e:app.select(key))
@@ -61,17 +62,17 @@ class CameraSurface:
             canvas.create_image(w//2,h//2,image=self.photo)
         else:
             text=note or ('等待相机直播' if c.recording else '录像已停止 · 可选择赛事回放')
-            canvas.create_text(w//2,h//2,text=text,fill=T.FG_MUTED,font=T.F_BODY,width=max(80,w-30))
-        canvas.create_rectangle(0,0,w,27,fill='#101722',outline='')
-        canvas.create_text(12,13,text=self.key.upper(),fill=T.FG_TEXT,anchor='w',font=T.F_TITLE)
+            canvas.create_text(w//2,h//2,text=text,fill=T.VIDEO_MUTED,font=T.F_BODY,width=max(80,w-30))
+        canvas.create_rectangle(0,0,w,27,fill=T.VIDEO_HEADER,outline='')
+        canvas.create_text(12,13,text=self.key.upper(),fill=T.VIDEO_FG,anchor='w',font=T.F_TITLE)
         status=('REC ●' if c.recording else '已停止')+'  '+('回放' if replay else '直播')
-        canvas.create_text(w-10,13,text=status,fill=T.REC_RED if c.recording else T.FG_MUTED,
+        canvas.create_text(w-10,13,text=status,fill='#ff8b9a' if c.recording else T.VIDEO_MUTED,
                            anchor='e',font=T.F_SMALL)
         if img is not None:
             text=note or (tc(co.playhead()) if replay else '%.1f fps'%c.live_fps())
             if not replay and not alive:text='直播中断 · 等待恢复'
-            canvas.create_rectangle(0,h-25,w,h,fill='#101722',outline='')
-            canvas.create_text(10,h-13,text=text,anchor='w',fill=T.FG_TEXT,font=T.F_SMALL)
+            canvas.create_rectangle(0,h-25,w,h,fill=T.VIDEO_HEADER,outline='')
+            canvas.create_text(10,h-13,text=text,anchor='w',fill=T.VIDEO_FG,font=T.F_SMALL)
 
 
 class SportsMonitor:
@@ -108,21 +109,32 @@ class SportsMonitor:
                   selectforeground=[('readonly',T.FG_TEXT)])
         root.option_add('*TCombobox*Listbox.background',T.BG_PANEL)
         root.option_add('*TCombobox*Listbox.foreground',T.FG_TEXT)
-        top=tk.Frame(root,bg=T.BG_PANEL,height=42);top.pack(fill='x');top.pack_propagate(False)
-        tk.Label(top,text='赛事回放  /  RK3588',bg=T.BG_PANEL,fg=T.FG_TEXT,font=T.F_TITLE).pack(side='left',padx=16)
-        self.mode_label=tk.Label(top,text='直播',bg=T.BG_PANEL,fg=T.LIVE_GREEN,font=T.F_TITLE)
-        self.mode_label.pack(side='left',padx=18)
-        self.top_clock=tk.Label(top,bg=T.BG_PANEL,fg=T.FG_TEXT,font=T.F_HUD)
-        self.top_clock.pack(side='right',padx=16)
-        self.button(top,'四宫格 · Esc',self.grid_view).pack(side='right',padx=6,pady=5)
-        bottom=tk.Frame(root,bg=T.BG_PANEL,height=164);bottom.pack(side='bottom',fill='x');bottom.pack_propagate(False)
-        toolbar=tk.Frame(bottom,bg=T.BG_PANEL);toolbar.pack(fill='x',padx=10,pady=(5,0))
-        self.position_label=tk.Label(toolbar,text='00:00:00 / 00:00:00',font=T.F_HUD,bg=T.BG_PANEL,fg=T.FG_TEXT)
+        top_card=RoundedCard(root,padding=14)
+        top_card.pack(fill='x',padx=12,pady=(10,0))
+        top=top_card.body;top.configure(height=54);top.pack_propagate(False)
+        IconBadge(top,'camera',size=44,solid=True).pack(side='left',padx=(0,12),pady=5)
+        brand=tk.Frame(top,bg=T.BG_PANEL);brand.pack(side='left',padx=(0,22))
+        tk.Label(brand,text='赛事回放平台',bg=T.BG_PANEL,fg=T.FG_TEXT,font=T.F_BRAND).pack(anchor='w')
+        tk.Label(brand,text='多机位监看 · 关键时刻，一目了然',bg=T.BG_PANEL,fg=T.FG_MUTED,font=T.F_SMALL).pack(anchor='w')
+        self.mode_label=tk.Label(top,text='直播',bg=T.INFO_SOFT,fg=T.INFO_BLUE,font=T.F_SMALL,padx=14,pady=7)
+        self.mode_label.pack(side='left',padx=10)
+        self.top_clock=tk.Label(top,bg=T.BG_PANEL,fg=T.FG_MUTED,font=(T.FONT_MONO,11))
+        self.top_clock.pack(side='right',padx=(16,0))
+        self.button(top,'四宫格  Esc',self.grid_view).pack(side='right',padx=5,pady=5)
+        self.header_count=tk.Label(top,text='4 个机位',bg=T.BG_RAISED,fg=T.INFO_BLUE,font=T.F_SMALL,padx=12,pady=7)
+        self.header_count.pack(side='right',padx=10)
+        bottom_card=RoundedCard(root,padding=12,expand=True)
+        bottom_card.configure(height=186)
+        bottom_card.pack(side='bottom',fill='x',padx=12,pady=(0,10))
+        bottom=bottom_card.body
+        toolbar=tk.Frame(bottom,bg=T.BG_PANEL);toolbar.pack(fill='x',pady=(0,3))
+        tk.Label(toolbar,text='共同赛事时间轴',font=T.F_TITLE,bg=T.BG_PANEL,fg=T.FG_TEXT).pack(side='left',padx=(0,18))
+        self.position_label=tk.Label(toolbar,text='00:00:00 / 00:00:00',font=T.F_HUD,bg=T.BG_PANEL,fg=T.INFO_BLUE)
         self.position_label.pack(side='left')
         self.button(toolbar,'全程',self.fit_timeline).pack(side='right',padx=3)
         self.button(toolbar,'−',lambda:self.change_zoom(1/1.5)).pack(side='right',padx=3)
         self.button(toolbar,'＋',lambda:self.change_zoom(1.5)).pack(side='right',padx=3)
-        self.timeline=tk.Canvas(bottom,bg='#101722',height=112,highlightthickness=0)
+        self.timeline=tk.Canvas(bottom,bg=T.BG_PANEL,height=112,highlightthickness=0)
         self.timeline.pack(fill='both',expand=True,padx=8,pady=3)
         self.timeline.bind('<Button-1>',self.timeline_press)
         self.timeline.bind('<B1-Motion>',self.timeline_motion)
@@ -132,9 +144,9 @@ class SportsMonitor:
         self.timeline.bind('<Button-5>',lambda e:self.change_zoom(1/1.5))
         self.timeline.bind('<Shift-Button-4>',lambda e:self.pan(-.15))
         self.timeline.bind('<Shift-Button-5>',lambda e:self.pan(.15))
-        self.stage=tk.Frame(root,bg=T.BG_APP);self.stage.pack(fill='both',expand=True,padx=8,pady=7)
-        self.matrix=tk.Frame(self.stage,bg='#030609')
-        self.side=tk.Frame(self.stage,bg=T.BG_PANEL)
+        self.stage=tk.Frame(root,bg=T.BG_APP);self.stage.pack(fill='both',expand=True,padx=12,pady=10)
+        self.matrix=tk.Frame(self.stage,bg=T.VIDEO_BG)
+        self.side=tk.Frame(self.stage,bg=T.BG_APP)
         self.surfaces={k:CameraSurface(self.matrix,self,k) for k in self.ctls}
         self.stage.bind('<Configure>',self.layout)
         self._sidebar()
@@ -155,95 +167,154 @@ class SportsMonitor:
 
     @staticmethod
     def button(parent,text,fn,color=None):
-        return tk.Button(parent,text=text,command=fn,font=T.F_BODY,relief='flat',bd=0,
-                          bg=color or T.BG_RAISED,fg=T.FG_TEXT,activebackground=T.BG_HOVER,
-                          activeforeground=T.FG_TEXT,padx=8,pady=7,cursor='hand2')
+        return SoftButton(parent,text,fn,color=color)
 
     def _sidebar(self):
-        control_wrap=tk.Frame(self.side,bg=T.BG_PANEL,width=350)
-        control_wrap.pack(side='left',fill='y',padx=6,pady=10);control_wrap.pack_propagate(False)
-        scroll=tk.Scrollbar(control_wrap,orient='vertical')
+        control_wrap=tk.Frame(self.side,bg=T.BG_APP,width=380)
+        control_wrap.pack(side='left',fill='y',padx=(0,12));control_wrap.pack_propagate(False)
+        style=ttk.Style(self.root)
+        style.configure('Sports.Vertical.TScrollbar',background='#c9d8ee',troughcolor=T.BG_APP,
+                         bordercolor=T.BG_APP,arrowcolor=T.FG_MUTED,arrowsize=10)
+        scroll=ttk.Scrollbar(control_wrap,orient='vertical',style='Sports.Vertical.TScrollbar')
         scroll.pack(side='right',fill='y')
-        viewport=tk.Canvas(control_wrap,bg=T.BG_PANEL,highlightthickness=0,yscrollcommand=scroll.set)
+        viewport=tk.Canvas(control_wrap,bg=T.BG_APP,highlightthickness=0,yscrollcommand=scroll.set)
         viewport.pack(side='left',fill='both',expand=True);scroll.config(command=viewport.yview)
-        self.controls=tk.Frame(viewport,bg=T.BG_PANEL)
-        viewport.create_window((0,0),window=self.controls,anchor='nw',width=330)
+        self.controls=tk.Frame(viewport,bg=T.BG_APP)
+        content=viewport.create_window((0,0),window=self.controls,anchor='nw',width=350)
+        viewport.bind('<Configure>',lambda e:viewport.itemconfigure(content,width=max(1,e.width)))
         self.controls.bind('<Configure>',lambda e:viewport.config(scrollregion=viewport.bbox('all')))
         viewport.bind('<Button-4>',lambda e:viewport.yview_scroll(-3,'units'))
         viewport.bind('<Button-5>',lambda e:viewport.yview_scroll(3,'units'))
-        self.info=tk.Frame(self.side,bg=T.BG_PANEL)
-        self.info.pack(side='left',fill='both',expand=True,padx=(0,12),pady=10)
-        def title(parent,text):
-            tk.Label(parent,text=text,bg=T.BG_PANEL,fg=T.FG_TEXT,font=T.F_TITLE,anchor='w').pack(fill='x',pady=(4,8))
-        title(self.controls,'赛事控制')
-        self.match_combo=ttk.Combobox(self.controls,state='readonly',style='Sports.TCombobox',font=T.F_SMALL)
-        self.match_combo.pack(fill='x',pady=3)
+        def scroll_controls(e):
+            if not str(e.widget).startswith(str(self.controls)) or 'popdown' in str(e.widget):return
+            if isinstance(e.widget,(ttk.Combobox,tk.Listbox)):return
+            delta=getattr(e,'delta',0)
+            direction=(-1 if delta>0 else 1) if delta else (-1 if e.num==4 else 1)
+            viewport.yview_scroll(direction*3,'units')
+            return 'break'
+        for sequence in ['<MouseWheel>','<Button-4>','<Button-5>']:
+            self.root.bind_all(sequence,scroll_controls,add='+')
+        self.info=tk.Frame(self.side,bg=T.BG_APP)
+        self.info.pack(side='left',fill='both',expand=True)
+
+        def card(title,kind,color=T.INFO_BLUE,subtitle=None):
+            panel=RoundedCard(self.controls,padding=14)
+            panel.pack(fill='x',pady=(0,10))
+            section_heading(panel.body,title,kind,color=color,subtitle=subtitle)
+            return panel.body
+
+        def row(parent,buttons):
+            frame=tk.Frame(parent,bg=parent.cget('bg'));frame.pack(fill='x',pady=3)
+            for text,fn,color in buttons:
+                self.button(frame,text,fn,color).pack(side='left',fill='x',expand=True,padx=2)
+            return frame
+
+        recording=card('赛事录制','camera',subtitle='统一启停，保留每个机位的原始录像')
+        self.match_combo=ttk.Combobox(recording,state='readonly',style='Sports.TCombobox',font=T.F_SMALL)
+        self.match_combo.pack(fill='x',pady=(1,6),ipady=4)
         self.match_combo.bind('<<ComboboxSelected>>',self.choose_match)
-        row=tk.Frame(self.controls,bg=T.BG_PANEL);row.pack(fill='x',pady=3)
-        self.button(row,'刷新赛事',self.refresh_catalog).pack(side='left',fill='x',expand=True,padx=(0,3))
-        self.button(row,'组合录像…',self.combine_dialog).pack(side='left',fill='x',expand=True)
-        row=tk.Frame(self.controls,bg=T.BG_PANEL);row.pack(fill='x',pady=(10,3))
-        self.start_button=self.button(row,'● 全部开始录像',lambda:self.batch('start'),T.LIVE_GREEN_D)
+        row(recording,[('刷新赛事',self.refresh_catalog,None),('组合录像',self.combine_dialog,None)])
+        rec_row=tk.Frame(recording,bg=T.BG_PANEL);rec_row.pack(fill='x',pady=(9,4))
+        self.start_button=self.button(rec_row,'● 全部开始录像',lambda:self.batch('start'),T.INFO_BLUE_D)
         self.start_button.pack(side='left',fill='x',expand=True,padx=(0,4))
-        self.stop_button=self.button(row,'■ 全部停止',self.confirm_stop,T.REC_RED_D)
+        self.stop_button=self.button(rec_row,'■ 全部停止',self.confirm_stop,T.REC_RED_D)
         self.stop_button.pack(side='left',fill='x',expand=True)
-        self.rec_label=tk.Label(self.controls,text='录制状态读取中',bg=T.BG_PANEL,fg=T.FG_MUTED,font=T.F_SMALL,anchor='w')
-        self.rec_label.pack(fill='x',pady=(3,10))
-        title(self.controls,'回放控制')
+        self.rec_label=tk.Label(recording,text='录制状态读取中',bg=T.BG_PANEL,fg=T.FG_MUTED,font=T.F_SMALL,anchor='w')
+        self.rec_label.pack(fill='x',pady=(5,0))
+
+        playback=card('多机位回放','play',subtitle='共用一个赛事时刻，定位关键画面')
         self.linked=tk.BooleanVar(value=True)
-        tk.Checkbutton(self.controls,text='四路联动（取消后仅控制选中相机）',variable=self.linked,
-                        command=self.toggle_link,bg=T.BG_PANEL,fg=T.FG_TEXT,
-                        selectcolor=T.BG_RAISED,activebackground=T.BG_PANEL,
-                        activeforeground=T.FG_TEXT,font=T.F_SMALL).pack(anchor='w',pady=3)
-        for buttons in [[('返回直播',self.go_live),('最近 10 秒',lambda:self.recent(10)),('最近 30 秒',lambda:self.recent(30))],
-                        [('◀ 单帧',lambda:self.co.step(-1)),('播放 / 暂停',self.co.pause),('单帧 ▶',lambda:self.co.step(1))]]:
-            row=tk.Frame(self.controls,bg=T.BG_PANEL);row.pack(fill='x',pady=3)
-            for text,fn in buttons:self.button(row,text,fn).pack(side='left',fill='x',expand=True,padx=2)
-        row=tk.Frame(self.controls,bg=T.BG_PANEL);row.pack(fill='x',pady=3)
+        tk.Checkbutton(playback,text='四路联动',variable=self.linked,command=self.toggle_link,
+                        bg=T.BG_PANEL,fg=T.INFO_BLUE,selectcolor=T.INFO_SOFT,
+                        activebackground=T.BG_PANEL,activeforeground=T.INFO_BLUE,
+                        font=T.F_BODY,bd=0,highlightthickness=0).pack(anchor='w',pady=(0,5))
+        row(playback,[('返回直播',self.go_live,None),('最近 10 秒',lambda:self.recent(10),None),('最近 30 秒',lambda:self.recent(30),None)])
+        row(playback,[('◀ 单帧',lambda:self.co.step(-1),None),('播放 / 暂停',self.co.pause,None),('单帧 ▶',lambda:self.co.step(1),None)])
+        rates=tk.Frame(playback,bg=T.BG_PANEL);rates.pack(fill='x',pady=(7,3))
         self.speed_buttons={}
         for speed in [.25,.5,1.,2.]:
-            b=self.button(row,'%gx'%speed,lambda s=speed:self.co.set_speed(s))
-            b.pack(side='left',fill='x',expand=True,padx=2);self.speed_buttons[speed]=b
-        self.link_status=tk.Label(self.controls,bg=T.BG_PANEL,fg=T.WARN_AMBER,font=T.F_SMALL,anchor='w',wraplength=315)
-        self.link_status.pack(fill='x',pady=(5,12))
-        title(self.controls,'选中相机')
-        self.selected_label=tk.Label(self.controls,text=self.selected.upper(),bg=T.BG_PANEL,fg=T.INFO_BLUE,font=T.F_BODY,anchor='w')
-        self.selected_label.pack(fill='x',pady=4)
-        for buttons in [[('放大 / 四宫格',lambda:self.focus_camera(self.selected) if self.focused is None else self.grid_view()),
-                         ('截图',lambda:self.ctls[self.selected].snapshot())],
-                        [('单路开始',lambda:self.batch('start',[self.selected])),('单路停止',self.confirm_single_stop)],
-                        [('时间对齐…',self.align_dialog),('归档选中…',self.archive_selected)]]:
-            row=tk.Frame(self.controls,bg=T.BG_PANEL);row.pack(fill='x',pady=3)
-            for text,fn in buttons:self.button(row,text,fn).pack(side='left',fill='x',expand=True,padx=2)
-        self.button(self.controls,'测量设备时钟（新赛事自动使用）',self.calibrate).pack(fill='x',pady=(10,3))
-        self.clock_label=tk.Label(self.controls,text='历史赛事需校准画面时间',bg=T.BG_PANEL,fg=T.FG_MUTED,font=T.F_SMALL,wraplength=315,justify='left',anchor='w')
-        self.clock_label.pack(fill='x',pady=3)
-        self.notice=tk.Label(self.controls,text=self.message,bg=T.BG_PANEL,fg=T.WARN_AMBER,
-                             font=T.F_SMALL,wraplength=315,justify='left',anchor='nw')
-        self.notice.pack(fill='both',expand=True,pady=(12,0))
-        title(self.info,'相机状态')
-        self.camera_labels={}
+            button=self.button(rates,'%gx'%speed,lambda s=speed:self.co.set_speed(s))
+            button.pack(side='left',fill='x',expand=True,padx=2);self.speed_buttons[speed]=button
+        self.link_status=tk.Label(playback,bg=T.INFO_SOFT,fg=T.FG_MUTED,font=T.F_SMALL,
+                                  anchor='w',justify='left',wraplength=300,padx=9,pady=7)
+        self.link_status.pack(fill='x',pady=(7,0))
+
+        selected=card('所选机位','camera',color=T.MARK_PURPLE)
+        self.selected_label=tk.Label(selected,text=self.selected.upper(),bg=T.BG_PANEL,
+                                      fg=T.INFO_BLUE,font=T.F_BODY,anchor='w',justify='left')
+        self.selected_label.pack(fill='x',pady=(0,6))
+        row(selected,[('放大 / 四宫格',lambda:self.focus_camera(self.selected) if self.focused is None else self.grid_view(),None),
+                       ('截图',lambda:self.ctls[self.selected].snapshot(),None)])
+        row(selected,[('单路开始',lambda:self.batch('start',[self.selected]),None),('单路停止',self.confirm_single_stop,None)])
+        row(selected,[('时间对齐',self.align_dialog,None),('归档选中',self.archive_selected,None)])
+
+        timing=card('时间校准','clock',color='#29a89d')
+        self.button(timing,'校准设备时钟',self.calibrate).pack(fill='x',pady=(0,5))
+        self.clock_label=tk.Label(timing,text='新赛事自动软件校准；旧录像可按共同动作对齐。',bg=T.BG_PANEL,
+                                  fg=T.FG_MUTED,font=T.F_SMALL,wraplength=300,justify='left',anchor='w')
+        self.clock_label.pack(fill='x')
+        notice=RoundedCard(self.controls,fill='#fff8e9',padding=12,shadow=False)
+        notice.pack(fill='x',pady=(0,8))
+        self.notice=tk.Label(notice.body,text=self.message,bg='#fff8e9',fg=T.WARN_AMBER,
+                             font=T.F_SMALL,wraplength=300,justify='left',anchor='nw')
+        self.notice.pack(fill='x')
+
+        status=RoundedCard(self.info,padding=14);status.pack(fill='x',pady=(0,10))
+        section_heading(status.body,'机位状态','camera',subtitle='连接与录制状态')
+        tiles=tk.Frame(status.body,bg=T.BG_PANEL);tiles.pack(fill='x')
+        self.camera_labels={};self.status_tiles={}
         for node in self.nodes:
-            label=tk.Label(self.info,bg=T.BG_RAISED,fg=T.FG_TEXT,font=T.F_SMALL,
-                            justify='left',anchor='w',padx=8,pady=7)
-            label.pack(fill='x',pady=3)
-            label.bind('<Button-1>',lambda e,k=node['id']:self.select(k))
-            self.camera_labels[node['id']]=label
-        title(self.info,'赛事事件')
-        event_row=tk.Frame(self.info,bg=T.BG_PANEL);event_row.pack(fill='x',pady=3)
-        self.note=tk.Entry(event_row,bg=T.BG_RAISED,fg=T.FG_TEXT,insertbackground=T.FG_TEXT,font=T.F_SMALL,relief='flat')
-        self.note.pack(side='left',fill='x',expand=True,ipady=7)
+            key=node['id']
+            tile=RoundedCard(tiles,fill=T.BG_RAISED,padding=8,radius=10,shadow=False)
+            label=tk.Label(tile.body,text=key.upper(),bg=T.BG_RAISED,fg=T.FG_TEXT,
+                            font=T.F_SMALL,justify='left',anchor='w',wraplength=180)
+            label.pack(fill='x')
+            for widget in [tile,tile.body,label]:widget.bind('<Button-1>',lambda e,k=key:self.select(k))
+            self.camera_labels[key]=label;self.status_tiles[key]=tile
+        def arrange_status(e=None):
+            cols=2 if tiles.winfo_width()>150 else 1
+            for i,key in enumerate(self.ctls):self.status_tiles[key].grid(row=i//cols,column=i%cols,sticky='nsew',padx=3,pady=3)
+            for col in [0,1]:tiles.columnconfigure(col,weight=1 if col<cols else 0,uniform='status' if col<cols else '')
+        tiles.bind('<Configure>',arrange_status)
+
+        events=RoundedCard(self.info,padding=14,expand=True)
+        events.pack(fill='both',expand=True)
+        section_heading(events.body,'赛事事件','mark',color=T.MARK_PURPLE)
+        entry_row=tk.Frame(events.body,bg=T.BG_PANEL);entry_row.pack(fill='x',pady=(1,8))
+        self.note=tk.Entry(entry_row,bg=T.BG_RAISED,fg=T.FG_TEXT,insertbackground=T.INFO_BLUE,
+                            font=T.F_BODY,relief='flat',bd=8)
         self.note.bind('<Return>',lambda e:self.add_event())
-        self.button(event_row,'＋ 标记',self.add_event).pack(side='right',padx=(4,0))
-        self.event_list=tk.Listbox(self.info,bg='#101722',fg=T.FG_TEXT,font=T.F_SMALL,
-                                   selectbackground=T.INFO_BLUE_D,relief='flat',highlightthickness=0)
-        self.event_list.pack(fill='both',expand=True,pady=6)
-        self.event_list.bind('<Double-Button-1>',lambda e:self.jump_event())
-        row=tk.Frame(self.info,bg=T.BG_PANEL);row.pack(fill='x')
+        mark_button=self.button(entry_row,'＋ 标记时刻',self.add_event,T.INFO_BLUE_D)
+        entry_mode=[None]
+        def arrange_entry(e):
+            stacked=e.width<280
+            if entry_mode[0]==stacked:return
+            entry_mode[0]=stacked;mark_button.pack_forget();self.note.pack_forget()
+            if stacked:
+                self.note.pack(fill='x',ipady=2)
+                mark_button.pack(fill='x',pady=(6,0))
+            else:
+                mark_button.pack(side='right',padx=(7,0))
+                self.note.pack(side='left',fill='x',expand=True,ipady=2)
+        entry_row.bind('<Configure>',arrange_entry)
+        tk.Label(events.body,text='双击标记跳转  ·  空格播放/暂停  ·  ← → 逐帧',bg=T.BG_PANEL,
+                  fg=T.FG_MUTED,font=T.F_TINY,anchor='w',wraplength=500).pack(side='bottom',fill='x',pady=(8,0))
+        actions=tk.Frame(events.body,bg=T.BG_PANEL);actions.pack(side='bottom',fill='x',pady=(8,0))
         for text,fn in [('跳转',self.jump_event),('删除',self.delete_event),('导出',self.export_events)]:
-            self.button(row,text,fn).pack(side='left',fill='x',expand=True,padx=2)
-        tk.Label(self.info,text='单击选中 · 双击放大\n空格播放/暂停 · ← →逐帧\n拖动底部时间轴联动定位\n关闭窗口不会停止设备录像',
-                  bg=T.BG_PANEL,fg=T.FG_MUTED,font=T.F_SMALL,justify='left',anchor='w').pack(fill='x',pady=10)
+            self.button(actions,text,fn).pack(side='left',fill='x',expand=True,padx=2)
+        event_area=tk.Frame(events.body,bg=T.BG_RAISED);event_area.pack(fill='both',expand=True)
+        event_scroll=ttk.Scrollbar(event_area,orient='vertical',style='Sports.Vertical.TScrollbar')
+        self.event_list=tk.Listbox(event_area,bg=T.BG_RAISED,fg=T.FG_TEXT,font=T.F_BODY,
+                                   selectbackground=T.INFO_SOFT,selectforeground=T.INFO_BLUE,
+                                   relief='flat',highlightthickness=0,yscrollcommand=event_scroll.set)
+        self.event_list.pack(side='left',fill='both',expand=True,padx=8,pady=8)
+        event_scroll.pack(side='right',fill='y');event_scroll.config(command=self.event_list.yview)
+        self.event_list.bind('<Double-Button-1>',lambda e:self.jump_event())
+        self.event_empty=tk.Label(event_area,text='还没有赛事标记\n\n记录关键判罚、精彩瞬间，\n下一次回看更快找到。',bg=T.BG_RAISED,
+                                   fg=T.FG_MUTED,font=T.F_SMALL,justify='center',wraplength=240)
+        self.event_area=event_area
+        event_area.bind('<Configure>',self.update_event_empty)
+
 
     def key_action(self,fn):
         if self.root.grab_current() is not None:return
@@ -619,6 +690,14 @@ class SportsMonitor:
     def update_events(self):
         self.event_list.delete(0,'end')
         for e in self.events:self.event_list.insert('end',tc(e['position'])+'  '+e['note'])
+        self.update_event_empty()
+
+    def update_event_empty(self,event=None):
+        width,height=self.event_area.winfo_width(),self.event_area.winfo_height()
+        if not self.events and height>110 and width>100:
+            self.event_empty.configure(wraplength=max(70,min(240,width-24)))
+            self.event_empty.place(relx=.5,rely=.5,anchor='center')
+        else:self.event_empty.place_forget()
 
     def jump_event(self):
         sel=self.event_list.curselection()
@@ -680,7 +759,7 @@ class SportsMonitor:
             if track:
                 for a,b in track.intervals():
                     left,right=max(x0,x(a-self.co.origin)),min(x1,x(b-self.co.origin))
-                    if right>left:canvas.create_rectangle(left,y,right,y+14,fill='#216e68',outline='')
+                    if right>left:canvas.create_rectangle(left,y,right,y+14,fill=T.TRACK_SELECTED if key==self.selected else T.TRACK_BLUE,outline='')
         for event in self.events:
             xx=x(event['position'])
             if x0<=xx<=x1:canvas.create_polygon(xx-4,20,xx+4,20,xx,26,fill=T.WARN_AMBER)
@@ -688,8 +767,8 @@ class SportsMonitor:
         if self.co.state=='live' and self.drag is None:pos=self.co.duration
         xx=x(pos)
         if x0<=xx<=x1:
-            canvas.create_line(xx,16,xx,108,fill=T.REC_RED,width=2)
-            canvas.create_polygon(xx-5,16,xx+5,16,xx,23,fill=T.REC_RED)
+            canvas.create_line(xx,16,xx,108,fill=T.INFO_BLUE,width=2)
+            canvas.create_polygon(xx-5,16,xx+5,16,xx,23,fill=T.INFO_BLUE)
         self.position_label.config(text='%s / %s%s'%(tc(pos),tc(self.co.duration),'  · 定位中' if self.co.state=='loading' else ''))
 
     def drain(self):
@@ -756,6 +835,7 @@ class SportsMonitor:
                 self.selected_label.config(text='%s · %s\n2448 × 2048 原画幅'%(self.selected.upper(),self.ctls[self.selected].args.host))
                 count=sum(c.recording for c in self.controllers)
                 self.rec_label.config(text='正在录制 %d/4 台%s'%(count,' · 执行中…' if self.batch_busy else ''))
+                self.header_count.config(text='4 个机位  ·  %d 路录制'%count)
                 for b in [self.start_button,self.stop_button]:b.config(state='disabled' if self.batch_busy else 'normal')
                 for speed,b in self.speed_buttons.items():b.config(bg=T.INFO_BLUE_D if self.co.speed==speed else T.BG_RAISED)
                 calibrated=sum(t.calibrated for t in self.co.tracks.values())
@@ -764,8 +844,12 @@ class SportsMonitor:
                 self.notice.config(text=self.message)
                 for key,c in self.ctls.items():
                     arch=' · 归档中' if c.archive_busy else ''
-                    self.camera_labels[key].config(text='%s  %s%s\n%s · %.1f fps'%(key.upper(),'录制中' if c.recording else '已停止',arch,
-                        '在线' if c.feed.alive() else '无直播',c.live_fps()),fg=T.FG_TEXT if c.feed.alive() else T.FG_MUTED)
+                    if self.info.winfo_width()<300:
+                        text='%s %s'%(key.upper(),'录' if c.recording else '停')
+                    else:
+                        text='%s  %s%s\n%s · %.1f fps'%(key.upper(),'录制中' if c.recording else '已停止',arch,
+                            '在线' if c.feed.alive() else '无直播',c.live_fps())
+                    self.camera_labels[key].config(text=text,fg=T.INFO_BLUE if key==self.selected else (T.FG_TEXT if c.feed.alive() else T.FG_MUTED))
             if now-self.last_catalog>5 and not self.catalog_busy:self.refresh_catalog()
             if any(c.recording for c in self.controllers) and now-self.last_clock>60 and not self.clock_busy:self.calibrate()
             if now-self.last_health>5:self.last_health=now;self.write_health()
