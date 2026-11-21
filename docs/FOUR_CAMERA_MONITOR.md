@@ -1,3 +1,5 @@
+> 本文记录早期四路界面。当前默认入口及操作方式见 [体育赛事回放平台](SPORTS_PLATFORM.md)。
+
 # 四路统一监看台
 
 在 DGX 项目目录运行 `./run_multi.sh --config nodes.local.json`，或点击桌面的“RK3588 四路监看台”。配置文件要求恰好四台节点，编号、地址和裁判端口不重复。沿用 `nodes.example.json` 的格式、SSH 别名和环境要求，不增加节点侧依赖。

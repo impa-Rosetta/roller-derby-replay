@@ -32,6 +32,13 @@ class UnifiedController(StudioController):
     """Keep independent playback clocks when several controllers share a loop."""
     ring_generation = 0
 
+    def mark_session_dir(self):
+        if self.opened is not None and self.opened.get('sports'):
+            directory=Path(self.args.out_dir)/'sports-marks'/self.opened['name']
+            directory.mkdir(parents=True,exist_ok=True)
+            return str(directory)
+        return super().mark_session_dir()
+
     def to_live(self):
         self.ring_generation += 1
         return super().to_live()
@@ -528,7 +535,8 @@ def main():
             for node in nodes:
                 controllers.append(UnifiedController(node_args(node, state_root, defaults)))
             root = tk.Tk()
-            app = MultiMonitor(root, nodes, controllers, state_root, pad_enabled=not opts.no_pad)
+            from sports_monitor import SportsMonitor
+            app = SportsMonitor(root, nodes, controllers, state_root, pad_enabled=not opts.no_pad)
             LOG.info('Started four-camera monitor')
             root.mainloop()
         finally:
