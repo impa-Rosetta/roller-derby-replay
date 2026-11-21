@@ -445,6 +445,7 @@ class SportsMonitor:
                 saved=json.loads(p.read_text())
                 if {k:v['directory'] for k,v in saved['tracks'].items()}==signature:
                     self.match_id=saved['id'];self.events=saved.get('events',[])
+                    self.match_name=saved.get('name',name)
                     for key,t in tracks.items():
                         v=saved['tracks'][key]
                         for field in ['offset','calibrated','uncertainty','clock_samples']:

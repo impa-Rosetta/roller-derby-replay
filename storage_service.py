@@ -8,6 +8,7 @@ import subprocess
 import time
 
 import storage_agent as agent
+from storage_matches import build_matches
 
 
 class StorageService:
@@ -63,7 +64,8 @@ class StorageService:
             row['other_copy'] = bool(other)
             row['archive_verified'] = bool((other if row['location'] == 'rk' else row) and
                                           (other if row['location'] == 'rk' else row).get('verified'))
-        return dict(disks=disks, rows=rows, errors=errors, measured=time.time())
+        return dict(disks=disks, rows=rows, errors=errors, measured=time.time(),
+                    matches=build_matches(rows,self.state_root,self.nodes))
 
     def audit(self, action, row, status, detail):
         self.state_root.mkdir(parents=True, exist_ok=True)

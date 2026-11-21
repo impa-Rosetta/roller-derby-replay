@@ -34,19 +34,22 @@ class StorageUITests(unittest.TestCase):
 
     def tearDown(self):
         self.ui.busy=False;self.ui.close();self.root.destroy();self.temp.cleanup()
+        self.ui=None;self.app=None;self.root=None
+        import gc
+        gc.collect()
 
     def test_table_filter_multiselection_and_action_geometry(self):
         self.assertEqual(len(self.ui.tree.get_children()),1)
         self.ui.tree.selection_set(*self.ui.tree.get_children());self.root.update()
-        self.assertIn('1 份录像',self.ui.selection_label.cget('text'))
+        self.assertIn('1 场比赛',self.ui.selection_label.cget('text'))
         for b in self.ui.action_buttons:
             self.assertGreater(b.winfo_height(),20)
             self.assertLessEqual(b.winfo_rootx()+b.winfo_width(),self.ui.window.winfo_rootx()+self.ui.window.winfo_width())
         self.ui.search.set('no-match');self.assertEqual(len(self.ui.tree.get_children()),0)
         self.ui.search.set('');self.ui.location.current(2);self.ui.render_rows()
         self.assertEqual(len(self.ui.tree.get_children()),0)
-        self.ui.location.current(0);self.ui.render_rows();self.ui.only_archived.set(True);self.ui.render_rows()
-        self.assertEqual(len(self.ui.tree.get_children()),0)
+        self.ui.location.current(1);self.ui.render_rows()
+        self.assertEqual(len(self.ui.tree.get_children()),1)
 
     def test_cancel_delete_does_not_start_operation(self):
         self.ui.tree.selection_set(*self.ui.tree.get_children())
@@ -64,6 +67,53 @@ class StorageUITests(unittest.TestCase):
         self.assertFalse(self.ui.busy);self.assertEqual(len(self.ui.tree.get_children()),0)
         self.assertIn('成功 1',self.ui.status.cget('text'))
         self.app.storage_before_delete.assert_called_once();self.app.storage_after_operation.assert_called_once()
+
+    def four_camera_match(self, with_archives=False):
+        import shutil
+        nodes=[];roots={};tracks={}
+        original=self.base/'rk'/NAME
+        for key in ['rk1','rk2','rk3','rk4']:
+            source=self.base/key/NAME
+            shutil.copytree(original,source)
+            archive=self.base/'archives'/key
+            if with_archives:
+                archive.mkdir(parents=True);shutil.copytree(source,archive/NAME)
+            nodes.append(dict(id=key,remote='test',remote_root=str(source.parent)))
+            roots[key]=str(archive)
+            self.app.ctls[key]=SimpleNamespace(archive_dir=str(archive),loader=SimpleNamespace(local_dirs=[str(archive)]))
+            tracks[key]=dict(name=NAME,offset=1.25,calibrated=True)
+        self.app.nodes=nodes
+        (self.app.state_root/'matches').mkdir(parents=True)
+        (self.app.state_root/'matches/game.json').write_text(json.dumps(dict(name='四路比赛',tracks=tracks)))
+        self.ui.service=LocalTransport(nodes,roots,self.app.state_root)
+        self.ui.show_snapshot(self.ui.service.snapshot())
+        game=self.ui.tree.get_children()[0]
+        self.ui.tree.selection_set(game+'|rk4')
+        return game
+
+    def test_selecting_camera_child_archives_entire_four_camera_match(self):
+        self.four_camera_match()
+        self.assertEqual(len(self.ui.tree.get_children()),1)
+        self.assertEqual(len(self.ui.selected()),4)
+        with patch('storage_manager.messagebox.askyesno',return_value=True),patch.object(self.ui,'start_operation') as start:
+            self.ui.archive()
+        action,rows=start.call_args[0]
+        self.assertEqual(action,'archive');self.assertEqual({r['node'] for r in rows},{'rk1','rk2','rk3','rk4'})
+
+    def test_delete_entire_match_includes_both_locations_for_all_four_cameras(self):
+        self.four_camera_match(with_archives=True)
+        with patch('storage_manager.messagebox.askyesno',return_value=True),patch.object(self.ui,'start_operation') as start:
+            self.ui.delete('all')
+        action,rows=start.call_args[0]
+        self.assertEqual(action,'delete');self.assertEqual(len(rows),8)
+        self.assertEqual({r['location'] for r in rows},{'rk','dgx'})
+
+    def test_camera_child_preview_opens_four_tracks_and_preserves_alignment(self):
+        self.four_camera_match()
+        self.ui.preview()
+        tracks,name=self.app.use_group.call_args[0]
+        self.assertEqual(len(tracks),4);self.assertEqual(name,'四路比赛')
+        self.assertTrue(all(t.calibrated and t.offset==1.25 for t in tracks.values()))
 
 
 class StorageReferenceTests(unittest.TestCase):

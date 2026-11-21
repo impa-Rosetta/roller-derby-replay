@@ -23,6 +23,10 @@ class LocalTransport(StorageService):
 
 class StorageTests(unittest.TestCase):
     def setUp(self):
+        # Earlier GUI tests may leave Tk reference cycles. Finalize them on
+        # the GUI/main thread before this fixture starts scan worker threads.
+        import gc
+        gc.collect()
         self.temp = tempfile.TemporaryDirectory();self.root = Path(self.temp.name)
         self.remote = self.root/'rk';self.local = self.root/'dgx'
         self.session = self.remote/NAME;self.session.mkdir(parents=True)
