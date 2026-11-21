@@ -22,7 +22,7 @@ def remote_python(remote, source, timeout=30):
     return result.stdout
 
 
-def camera_catalog(node):
+def camera_catalog(node, local_root=None):
     root = node.get('remote_root', '~/hk_record')
     source = '''from pathlib import Path
 import json
@@ -34,7 +34,7 @@ for process in Path('/proc').glob('[0-9]*'):
   args=(process/'cmdline').read_bytes().split(bytes([0]))
   if any(Path(a.decode(errors='replace')).name=='hk_pipeline_rk.py' for a in args):active=True;break
  except OSError:pass
-directories=sorted(root.glob('stage1_*'),reverse=True)[:16]
+directories=sorted(root.glob('stage1_*'),reverse=True)
 for d in directories:
  p=d/'meta.jsonl'
  rows=[]
@@ -48,7 +48,25 @@ for d in directories:
  sessions.append(dict(name=d.name,dir=str(d),segments=rows,active=active and d==directories[0]))
 print(json.dumps(sessions))
 '''.replace('ROOT', repr(root))
-    return json.loads(remote_python(node['remote'], source))
+    local = []
+    if local_root:
+        from storage_agent import read_segments, SESSION
+        root = Path(local_root).expanduser()
+        if root.is_dir():
+            for directory in sorted(root.iterdir(), reverse=True):
+                if directory.is_symlink() or not directory.is_dir() or not SESSION.fullmatch(directory.name):continue
+                segments = read_segments(directory)
+                for segment in segments:segment['local_dir'] = str(directory)
+                if segments:local.append(dict(name=directory.name,dir=str(directory),segments=segments,active=False))
+    try:
+        remote = json.loads(remote_python(node['remote'], source))
+    except Exception:
+        if not local:raise
+        LOG.warning('Node %s unavailable; using DGX archives', node['id'])
+        for session in local:session['node_offline']=True
+        return local
+    names = {s['name'] for s in remote}
+    return remote+[s for s in local if s['name'] not in names]
 
 
 def measure_clock(node, samples=7):

@@ -92,10 +92,12 @@ class SportsMonitor:
         self.events=[];self.calibrations={};self.clock_busy=False;self.last_clock=0
         self.batch_busy=False;self.batch_action='';self.batch_pending=set();self.batch_results={}
         self.catalog_busy=False;self.last_catalog=0;self.pending_new=False
+        self.catalog_generation=0
         self.after_stop=False;self.last_save=0;self.last_health=0;self.last_render=0
         self.message='正在读取四台设备的赛事录像索引…'
         self.zoom=1.;self.view_start=0.;self.drag=None;self.drag_resume=True
         self.pads=[]
+        self.storage_manager=None
         root.title('RK3588 体育赛事回放平台')
         root.configure(bg=T.BG_APP);root.geometry('1800x1050');root.minsize(1200,800)
         root.protocol('WM_DELETE_WINDOW',self.close)
@@ -121,6 +123,7 @@ class SportsMonitor:
         self.top_clock=tk.Label(top,bg=T.BG_PANEL,fg=T.FG_MUTED,font=(T.FONT_MONO,11))
         self.top_clock.pack(side='right',padx=(16,0))
         self.button(top,'四宫格  Esc',self.grid_view).pack(side='right',padx=5,pady=5)
+        self.button(top,'录像管理',self.open_storage_manager).pack(side='right',padx=5,pady=5)
         self.header_count=tk.Label(top,text='4 个机位',bg=T.BG_RAISED,fg=T.INFO_BLUE,font=T.F_SMALL,padx=12,pady=7)
         self.header_count.pack(side='right',padx=10)
         bottom_card=RoundedCard(root,padding=12,expand=True)
@@ -214,6 +217,7 @@ class SportsMonitor:
         self.match_combo.pack(fill='x',pady=(1,6),ipady=4)
         self.match_combo.bind('<<ComboboxSelected>>',self.choose_match)
         row(recording,[('刷新赛事',self.refresh_catalog,None),('组合录像',self.combine_dialog,None)])
+        self.button(recording,'录像与存储管理',self.open_storage_manager).pack(fill='x',pady=(3,4))
         rec_row=tk.Frame(recording,bg=T.BG_PANEL);rec_row.pack(fill='x',pady=(9,4))
         self.start_button=self.button(rec_row,'● 全部开始录像',lambda:self.batch('start'),T.INFO_BLUE_D)
         self.start_button.pack(side='left',fill='x',expand=True,padx=(0,4))
@@ -366,16 +370,18 @@ class SportsMonitor:
 
     def refresh_catalog(self):
         if self.catalog_busy:return
+        manager=getattr(self,'storage_manager',None)
+        if manager and manager.busy:return
         self.catalog_busy=True;self.last_catalog=time.monotonic()
         def fetch():
             result={}
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                futures={pool.submit(camera_catalog,n):n['id'] for n in self.nodes}
+                futures={pool.submit(camera_catalog,n,self.ctls[n['id']].archive_dir):n['id'] for n in self.nodes}
                 for f,key in futures.items():
                     try:result[key]=f.result()
                     except Exception:LOG.exception('Catalog %s unavailable',key)
             return result
-        self.job('catalog',fetch)
+        self.job('catalog',fetch,self.catalog_generation)
 
     def apply_catalog(self,result):
         self.catalog_busy=False
@@ -384,6 +390,7 @@ class SportsMonitor:
             for key,sessions in result.items():
                 ctl=self.ctls[key]
                 if ctl.remote_busy:continue
+                if sessions and all(s.get('node_offline') for s in sessions):continue
                 active=any(s.get('active',False) for s in sessions)
                 if active and not ctl.recording:ctl.feed.set_want(True)
                 ctl.recording=active
@@ -492,6 +499,9 @@ class SportsMonitor:
 
     def batch(self,action,keys=None):
         if self.batch_busy:return
+        manager=getattr(self,'storage_manager',None)
+        if manager and manager.busy:
+            self.message='录像管理正在传输、校验或删除，请完成后再启停录制。';return
         keys=list(keys or self.ctls)
         if any(self.ctls[k].remote_busy for k in keys):
             self.message='所选设备正在执行其他录制操作，请稍候。';return
@@ -609,11 +619,7 @@ class SportsMonitor:
         self.update_events()
 
     def archive_selected(self):
-        key=self.selected;track=self.co.tracks.get(key)
-        if track is None:return
-        if self.ctls[key].recording:
-            self.message='请先停止该路录制，再归档完整场次。';return
-        self.job('archive-info',lambda:self.ctls[key].archiver.info(track.name),(key,track.name))
+        self.open_storage_manager()
 
     def archive_dialog(self,key,name,info):
         from studio_ui_rk import ArchiveConfirmDialog
@@ -622,6 +628,82 @@ class SportsMonitor:
         if dialog.result:
             destination,remove=dialog.result
             ctl.start_archive(destination,remove_remote=remove,sess=name,total=info['bytes'])
+
+    def open_storage_manager(self):
+        from storage_manager import StorageManager
+        if self.storage_manager and not self.storage_manager.closed:
+            self.storage_manager.window.deiconify();self.storage_manager.window.lift();return
+        self.storage_manager=StorageManager(self)
+
+    def storage_before_delete(self,rows):
+        self.catalog_generation+=1
+        removed={r['directory'] for r in rows}
+        if any(t.directory in removed for t in self.co.tracks.values()):
+            self.co.live()
+            for ctl in self.controllers:
+                ctl.loader.clear_pending();ctl.close_session(quiet=True)
+        self.message='正在按所选副本位置删除录像…'
+
+    def storage_after_operation(self,action,outcomes,snapshot):
+        if action!='delete':
+            self.refresh_catalog();return
+        deleted={(r['node'],r['directory']):r for r,success,detail in outcomes if success}
+        if not deleted:
+            self.refresh_catalog();return
+        alternatives={(r['node'],r['name']):r for r in snapshot['rows'] if r['segments']}
+
+        def update_tracks(tracks):
+            for key,track in list(tracks.items()):
+                directory=track['directory']
+                if (key,directory) not in deleted:continue
+                other=alternatives.get((key,track['name']))
+                if other:
+                    track['directory']=other['directory']
+                    track['segments']=[dict(s,**({'local_dir':other['directory']} if other['location']=='dgx' else {}))
+                                       for s in other['segments']]
+                else:del tracks[key]
+
+        def origin(tracks):
+            return min((Track(**t).start for t in tracks.values() if t['segments']),default=0)
+
+        # Persisted calibration/events survive a switch from RK to DGX.
+        for p in (self.state_root/'matches').glob('*.json'):
+            try:
+                saved=json.loads(p.read_text());before=json.dumps(saved.get('tracks',{}),sort_keys=True)
+                old_origin=origin(saved['tracks'])
+                update_tracks(saved['tracks'])
+                if before!=json.dumps(saved['tracks'],sort_keys=True):
+                    if saved['tracks']:
+                        delta=old_origin-origin(saved['tracks'])
+                        for event in saved.get('events',[]):event['position']+=delta
+                    save_json(p,saved)
+            except (OSError,ValueError,KeyError):LOG.exception('Update deleted recording reference: %s',p)
+        current={key:t.dump() for key,t in self.co.tracks.items()}
+        changed=any((key,t.directory) in deleted for key,t in self.co.tracks.items())
+        old_origin=origin(current)
+        update_tracks(current)
+        if changed:
+            if current:
+                delta=old_origin-origin(current)
+                for event in self.events:event['position']+=delta
+            self.co.set_tracks({k:Track(**v) for k,v in current.items()})
+            self.ring_overlays.clear()
+            self.update_events()
+        for (key,directory),row in deleted.items():
+            loader=self.ctls[key].loader
+            with loader.cv:
+                for segment in row['segments']:
+                    name=segment['file'];loader.clips.pop(name,None);loader.bad.discard(name)
+                    loader.errors.pop(name,None);loader.fail_count.pop(name,None)
+            # Only this session's generated cache files are eligible for cleanup.
+            root=Path(loader.cache_dir).resolve()
+            for p in root.glob(row['name']+'__*'):
+                if p.is_file() and not p.is_symlink() and p.resolve().parent==root:
+                    try:p.unlink()
+                    except OSError:LOG.warning('Could not remove replay cache %s',p)
+            self.catalogs[key]=[s for s in self.catalogs.get(key,[]) if s['dir']!=directory]
+        self.save_match();self.refresh_catalog()
+        self.message='录像副本已删除；保留的另一处副本可继续回放。'
 
     def go_live(self):
         self.ring_overlays.clear()
@@ -781,6 +863,7 @@ class SportsMonitor:
             except queue.Empty:break
             if kind=='catalog':
                 self.catalog_busy=False
+                if context!=self.catalog_generation:continue
                 if result is not None:self.apply_catalog(result)
                 elif error:self.message='读取赛事失败：'+error
             elif kind=='batch':self.batch_result(context,result,error)
@@ -865,6 +948,10 @@ class SportsMonitor:
 
     def close(self):
         if self.closing:return
+        manager=getattr(self,'storage_manager',None)
+        if manager and manager.busy:
+            manager.window.lift();self.message='录像管理任务进行中，请完成后再退出。';return
+        if manager and not manager.closed:manager.close()
         self.closing=True
         self.co.shutdown()
         self.save_match()
