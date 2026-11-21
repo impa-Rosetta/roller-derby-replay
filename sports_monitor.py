@@ -305,19 +305,20 @@ class SportsMonitor:
                 mark_button.pack(side='right',padx=(7,0))
                 self.note.pack(side='left',fill='x',expand=True,ipady=2)
         entry_row.bind('<Configure>',arrange_entry)
-        tk.Label(events.body,text='双击标记跳转  ·  空格播放/暂停  ·  ← → 逐帧',bg=T.BG_PANEL,
+        tk.Label(events.body,text='双击标记跳转  ·  选中后可编辑备注  ·  F2 编辑',bg=T.BG_PANEL,
                   fg=T.FG_MUTED,font=T.F_TINY,anchor='w',wraplength=500).pack(side='bottom',fill='x',pady=(8,0))
         actions=tk.Frame(events.body,bg=T.BG_PANEL);actions.pack(side='bottom',fill='x',pady=(8,0))
-        for text,fn in [('跳转',self.jump_event),('删除',self.delete_event),('导出',self.export_events)]:
+        for text,fn in [('跳转',self.jump_event),('编辑',self.edit_event),('删除',self.delete_event),('导出',self.export_events)]:
             self.button(actions,text,fn).pack(side='left',fill='x',expand=True,padx=2)
         event_area=tk.Frame(events.body,bg=T.BG_RAISED);event_area.pack(fill='both',expand=True)
         event_scroll=ttk.Scrollbar(event_area,orient='vertical',style='Sports.Vertical.TScrollbar')
         self.event_list=tk.Listbox(event_area,bg=T.BG_RAISED,fg=T.FG_TEXT,font=T.F_BODY,
                                    selectbackground=T.INFO_SOFT,selectforeground=T.INFO_BLUE,
-                                   relief='flat',highlightthickness=0,yscrollcommand=event_scroll.set)
+                                    relief='flat',highlightthickness=0,exportselection=False,yscrollcommand=event_scroll.set)
         self.event_list.pack(side='left',fill='both',expand=True,padx=8,pady=8)
         event_scroll.pack(side='right',fill='y');event_scroll.config(command=self.event_list.yview)
         self.event_list.bind('<Double-Button-1>',lambda e:self.jump_event())
+        self.event_list.bind('<F2>',lambda e:self.edit_event())
         self.event_empty=tk.Label(event_area,text='还没有赛事标记\n\n记录关键判罚、精彩瞬间，\n下一次回看更快找到。',bg=T.BG_RAISED,
                                    fg=T.FG_MUTED,font=T.F_SMALL,justify='center',wraplength=240)
         self.event_area=event_area
@@ -793,6 +794,30 @@ class SportsMonitor:
     def delete_event(self):
         sel=self.event_list.curselection()
         if sel:self.events.pop(sel[0]);self.save_match();self.update_events()
+
+    def edit_event(self):
+        selected=self.event_list.curselection()
+        if not selected:
+            self.message='请先在赛事事件列表中选中一个标记，再编辑备注。'
+            return 'break'
+        target=self.events[selected[0]];match_id=self.match_id
+        note=simpledialog.askstring('编辑赛事标记',
+            '标记时间：%s\n修改备注（保留原标记时间）：'%tc(target['position']),
+            initialvalue=target['note'],parent=self.root)
+        if note is None:return 'break'
+        note=note.strip()
+        if not note:
+            messagebox.showinfo('备注不能为空','原备注已保留，请输入备注后再保存。',parent=self.root)
+            return 'break'
+        if self.match_id!=match_id or not any(e is target for e in self.events):
+            self.message='赛事或标记已变化，本次编辑未保存，请重新选择。'
+            return 'break'
+        target['note']=note
+        self.save_match();self.update_events()
+        index=next(i for i,e in enumerate(self.events) if e is target)
+        self.event_list.selection_set(index);self.event_list.activate(index);self.event_list.see(index)
+        self.message='标记备注已保存，原时间点保持不变。'
+        return 'break'
 
     def export_events(self):
         path=filedialog.asksaveasfilename(parent=self.root,title='导出赛事标记',defaultextension='.json',filetypes=[('JSON','*.json')])
