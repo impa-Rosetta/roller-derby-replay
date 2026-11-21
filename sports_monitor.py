@@ -264,10 +264,12 @@ class SportsMonitor:
             canvas=self.surfaces[key].canvas
             if self.focused is not None:
                 if key!=self.focused:canvas.place_forget();continue
-                canvas.place(x=0,y=0,relwidth=1,relheight=1)
+                # Tk place retains omitted options and ADDS relative sizes to
+                # absolute sizes. Reset both in either direction of the switch.
+                canvas.place(x=0,y=0,width=int(mw),height=int(mh),relwidth=0,relheight=0)
             else:
                 canvas.place(x=int((i%2)*mw/2),y=int((i//2)*mh/2),
-                              width=int(mw/2)-1,height=int(mh/2)-1)
+                              width=int(mw/2)-1,height=int(mh/2)-1,relwidth=0,relheight=0)
 
     def select(self,key):
         self.selected=key;self.co.selected=key
