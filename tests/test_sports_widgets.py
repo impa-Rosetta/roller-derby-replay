@@ -1,7 +1,7 @@
 import os
 import tkinter as tk
 import unittest
-from sports_widgets import RoundedCard,SoftButton
+from sports_widgets import RoundedCard,SoftButton,transport_state
 import sports_theme as T
 import studio_theme as OriginalTheme
 
@@ -32,6 +32,23 @@ class LightWidgetTests(unittest.TestCase):
     def test_light_theme_does_not_modify_original_monitor_theme(self):
         self.assertEqual(T.BG_PANEL,'#ffffff')
         self.assertEqual(OriginalTheme.BG_PANEL,'#161b22')
+
+    def test_transport_button_changes_between_triangle_and_two_bars(self):
+        button=SoftButton(self.root,'播放',lambda:None,symbol='play')
+        button.pack();self.root.update()
+        self.assertEqual(len(button.find_withtag('transport-icon')),1)
+        button.config(symbol='pause',text='暂停');self.root.update()
+        self.assertEqual(len(button.find_withtag('transport-icon')),2)
+
+
+class TransportStateTests(unittest.TestCase):
+    def test_transport_icon_tracks_playback_and_pending_resume(self):
+        for state in ['live','playing']:
+            self.assertEqual(transport_state(state)[0],'pause')
+        self.assertEqual(transport_state('paused')[0],'play')
+        for state in ['loading','buffering']:
+            self.assertEqual(transport_state(state,True)[0],'pause')
+            self.assertEqual(transport_state(state,False)[0],'play')
 
 
 if __name__=='__main__':unittest.main()

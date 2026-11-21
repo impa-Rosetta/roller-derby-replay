@@ -633,6 +633,8 @@ class ClipLoader(threading.Thread):
         os.makedirs(cache_dir, exist_ok=True)
         self.cv = threading.Condition()
         self.want = None          # 当前要拉的段（优先于队列）
+        self.pending_generation = 0
+        self.loading_generation = 0
         self.queue = []           # 待拉队列，先进先出
         self.clips = {}
         self.errors = {}
@@ -671,7 +673,23 @@ class ClipLoader(threading.Thread):
 
     def clip(self, name):
         with self.cv:
-            return self.clips.get(name)
+            info = self.clips.get(name)
+            if info is not None:
+                try:
+                    available = os.path.getsize(info['mkv']) > 0
+                except OSError:
+                    available = False
+                if not available:
+                    self.clips.pop(name, None)
+                    return None
+            return info
+
+    def clear_pending(self):
+        """Latest user seek replaces queued prefetches; active I/O may finish."""
+        with self.cv:
+            self.pending_generation += 1
+            self.want = None
+            self.queue.clear()
 
     def error(self, name):
         with self.cv:
@@ -720,6 +738,7 @@ class ClipLoader(threading.Thread):
                 if seg['file'] in self.clips:
                     continue
                 self.loading = seg['file']
+                self.loading_generation = self.pending_generation
                 return seg
 
     # 段请求丢失 / 网卡停摆时不要无脑重试整个队列，只重试被用户要的段
@@ -731,6 +750,7 @@ class ClipLoader(threading.Thread):
             if seg is None:
                 return
             name = seg['file']
+            generation = self.loading_generation
             for attempt, delay in enumerate(self.RETRY_DELAYS):
                 if delay and self.stop_evt.wait(delay):
                     return
@@ -751,6 +771,9 @@ class ClipLoader(threading.Thread):
                     with self.cv:
                         self.errors[name] = msg
                         self.fail_count[name] = attempt + 1
+                        if generation != self.pending_generation or (self.want is not None and self.want['file'] != name):
+                            self.loading = ''
+                            break  # A newer seek takes priority over old retries.
                         # 数据本身坏了（空/短/帧数不符）：重拉结果一样，不必重试。
                         # 但**只放弃这一段**，不能 return——退出去会把整个
                         # loader 线程杀掉，之后所有请求都无人处理、clip()

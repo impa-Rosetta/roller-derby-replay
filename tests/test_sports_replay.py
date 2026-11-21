@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import time
 import threading
+from unittest.mock import patch,Mock
 from pathlib import Path
 from sports_replay import Track,ReplayCoordinator,grouped_sessions,save_json
 
@@ -147,6 +148,53 @@ class CoordinatorTests(unittest.TestCase):
         delta=self.co.rebase()
         self.assertEqual(delta,2)
         self.assertEqual(self.co.origin+self.co.playhead(),old)
+
+    def test_final_half_frame_does_not_read_past_encoded_frame_count(self):
+        self.ready();self.co.seek(9.925,False);self.co.tick()
+        for c in self.ctls.values():
+            c.idx=100;c.frame_count=100;c.cap.read=Mock(return_value=(False,None))
+        self.co.pause();self.time=.05;self.co.tick()
+        for c in self.ctls.values():c.cap.read.assert_not_called()
+        self.assertFalse(self.co.messages)
+
+    def test_error_does_not_latch_when_clock_enters_next_segment(self):
+        for key,t in self.co.tracks.items():t.segments.append(segment('b.h265',10,20,1010))
+        self.ready()
+        for c in self.ctls.values():c.loader.clips['b.h265']=dict(mkv='b',fps=10,frames=100)
+        self.co.seek(9,True);self.co.tick()
+        self.co.fail('a',segment(),'simulated early decoder EOF')
+        self.time=2;self.co.tick()
+        if self.co.state=='loading':self.co.tick()
+        self.assertEqual(self.co.state,'playing')
+        self.assertEqual(self.ctls['a'].seg['file'],'b.h265')
+        self.assertNotIn('a',self.co.messages)
+
+    def test_late_loader_success_restores_paused_failed_angle(self):
+        self.ready();del self.ctls['b'].loader.clips['a.h265'];self.ctls['b'].loader.errors['a.h265']='offline'
+        self.co.seek(3,False);self.co.tick();self.assertIn('b',self.co.messages)
+        self.ctls['b'].loader.clips['a.h265']=dict(mkv='b',fps=10,frames=100)
+        self.co.tick()
+        self.assertNotIn('b',self.co.messages)
+        self.assertIsNotNone(self.ctls['b'].drawn)
+
+    def test_hardware_first_frame_failure_tests_same_source_in_software(self):
+        from replay_capture_rk import HardwareReplayCapture
+        cap=object.__new__(HardwareReplayCapture)
+        cap.set=Mock(return_value=True);cap.read=Mock(return_value=(False,None));cap.release=Mock()
+        self.ctls['a']._open_capture=Mock(return_value=cap)
+        software=Capture()
+        with patch('cv2.VideoCapture',return_value=software) as factory:
+            result=self.co.prepare_capture('a',segment(),dict(mkv='/test/same.mkv',fps=10,frames=100),3)
+        factory.assert_called_once_with('/test/same.mkv')
+        self.assertIs(result['cap'],software);self.assertEqual(result['idx'],31)
+        cap.release.assert_called_once()
+
+    def test_reaching_match_end_marks_all_cameras_paused(self):
+        self.ready();self.co.seek(9,True);self.co.tick()
+        for c in self.ctls.values():c.paused=False
+        self.time=2;self.co.tick()
+        self.assertEqual(self.co.state,'paused')
+        self.assertTrue(all(c.paused for c in self.ctls.values()))
 
 
 class BackgroundCaptureTests(unittest.TestCase):

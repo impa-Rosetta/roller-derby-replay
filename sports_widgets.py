@@ -39,8 +39,9 @@ class RoundedCard(tk.Canvas):
 
 
 class SoftButton(tk.Canvas):
-    def __init__(self,parent,text,command,color=None,font=T.F_BODY,height=36):
+    def __init__(self,parent,text,command,color=None,font=T.F_BODY,height=36,symbol=None):
         self.text=text;self.command=command;self.color=color or T.BG_RAISED
+        self.symbol=symbol
         self.enabled=True;self.hover=False;self.pressed=False
         self.font=tkfont.Font(root=parent,font=font)
         width=self.font.measure(text)+22
@@ -67,6 +68,8 @@ class SoftButton(tk.Canvas):
             redraw|=value!=self.color;self.color=value
         if 'text' in changes:
             value=changes.pop('text');redraw|=value!=self.text;self.text=value
+        if 'symbol' in changes:
+            value=changes.pop('symbol');redraw|=value!=self.symbol;self.symbol=value
         if 'command' in changes:self.command=changes.pop('command')
         if changes:super().configure(**changes)
         if redraw:self._draw()
@@ -76,6 +79,7 @@ class SoftButton(tk.Canvas):
     def cget(self,key):
         if key=='state':return 'normal' if self.enabled else 'disabled'
         if key=='text':return self.text
+        if key=='symbol':return self.symbol
         return super().cget(key)
 
     def _hover(self,value):
@@ -111,7 +115,16 @@ class SoftButton(tk.Canvas):
             else:color=T.BG_HOVER;outline='#c5d8fc'
         if self.focus_get()==self:outline=T.INFO_BLUE
         rounded(self,1,1,w-1,h-1,9,fill=color,outline=outline,width=1)
-        self.create_text(w/2,h/2,text=self.text,fill=text,font=self.font)
+        if self.symbol=='play':
+            self.create_polygon(w/2-5,h/2-8,w/2-5,h/2+8,w/2+8,h/2,fill=text,outline='',tags='transport-icon')
+        elif self.symbol=='pause':
+            for x in [w/2-7,w/2+2]:self.create_rectangle(x,h/2-8,x+5,h/2+8,fill=text,outline='',tags='transport-icon')
+        else:self.create_text(w/2,h/2,text=self.text,fill=text,font=self.font)
+
+
+def transport_state(state,resume_after_load=True):
+    moving=state in ('live','playing') or (state in ('loading','buffering') and resume_after_load)
+    return ('pause','暂停') if moving else ('play','播放')
 
 
 class IconBadge(tk.Canvas):

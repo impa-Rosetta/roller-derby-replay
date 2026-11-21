@@ -8,6 +8,9 @@ import shlex
 import subprocess
 import time
 import concurrent.futures
+import logging
+
+LOG=logging.getLogger(__name__)
 
 
 def remote_python(remote, source, timeout=30):
@@ -210,6 +213,9 @@ class ReplayCoordinator:
         self.prepares={}
         self.neighbors={}
         self.buffer_keys=set()
+        self.failed_files={}
+        self.recoveries={}
+        self.recovery_attempts={}
 
     @staticmethod
     def release_future(future):
@@ -219,9 +225,9 @@ class ReplayCoordinator:
         if not future.cancel():future.add_done_callback(release)
 
     def discard_prepares(self):
-        for future in list(self.prepares.values())+list(self.neighbors.values()):
+        for future in list(self.prepares.values())+list(self.neighbors.values())+list(self.recoveries.values()):
             self.release_future(future)
-        self.prepares.clear();self.neighbors.clear()
+        self.prepares.clear();self.neighbors.clear();self.recoveries.clear()
 
     def shutdown(self):
         self.discard_prepares()
@@ -240,8 +246,64 @@ class ReplayCoordinator:
             if not ok:raise RuntimeError('无法读取目标帧')
             return dict(cap=cap,drawn=ctl._fit(frame),idx=index+1,fps=fps,
                         seg=seg,info=info)
-        except Exception:
-            cap.release();raise
+        except Exception as exc:
+            cap.release()
+            # Initialization can succeed but the first accurate hardware seek
+            # can still fail. Test the same source via software before calling
+            # the recording undecodable; never substitute another moment.
+            from replay_capture_rk import HardwareReplayCapture
+            if not isinstance(cap,HardwareReplayCapture):raise
+            LOG.warning('%s hardware first-frame failed for %s: %s; trying software',key,seg['file'],exc)
+            fallback=cv2.VideoCapture(info['mkv'])
+            try:
+                if not fallback.set(cv2.CAP_PROP_POS_FRAMES,index):raise RuntimeError('软件定位失败')
+                ok,frame=fallback.read()
+                if not ok:raise RuntimeError('硬件和软件均无法读取目标帧')
+                return dict(cap=fallback,drawn=ctl._fit(frame),idx=index+1,fps=fps,seg=seg,info=info)
+            except Exception:
+                fallback.release();raise
+
+    def fail(self,key,seg,message):
+        repeated=self.messages.get(key)==message and self.failed_files.get(key)==seg['file']
+        self.messages[key]=message
+        self.failed_files[key]=seg['file']
+        if not repeated:LOG.warning('Replay failure node=%s file=%s position=%.3f: %s',key,seg['file'],self.playhead(),message)
+
+    def recover(self,key,seg,pos):
+        """Retry a transient failure independently; a bad segment cannot latch
+        the camera forever after the common clock enters a different segment.
+        """
+        ctl=self.controllers[key]
+        identity=(key,seg['file'])
+        if self.failed_files.get(key)!=seg['file']:
+            future=self.recoveries.pop(key,None)
+            if future is not None:self.release_future(future)
+            self.failed_files[key]=seg['file']
+        future=self.recoveries.get(key)
+        if future is not None:
+            if not future.done():return False
+            self.recoveries.pop(key)
+            try:
+                self.install_capture(key,future.result())
+                self.messages.pop(key,None);self.failed_files.pop(key,None)
+                LOG.info('Replay recovered node=%s file=%s',key,seg['file'])
+                return True
+            except Exception as exc:self.fail(key,seg,'解码失败：'+str(exc))
+        attempts,last=self.recovery_attempts.get(identity,(0,-100))
+        if attempts>=2 or self.now()-last<1:return False
+        info=ctl.loader.clip(seg['file'])
+        if info is None:
+            if not ctl.loader.error(seg['file']):ctl.loader.request(seg)
+            return False
+        self.recovery_attempts[identity]=(attempts+1,self.now())
+        if self.pool is None:
+            try:
+                ctl._open_seg(seg,info,pos);self.messages.pop(key,None);self.failed_files.pop(key,None)
+                return ctl.cap is not None
+            except Exception as exc:self.fail(key,seg,'解码失败：'+str(exc));return False
+        self.messages[key]='正在恢复该路画面…'
+        self.recoveries[key]=self.pool.submit(self.prepare_capture,key,seg,info,pos)
+        return False
 
     def install_capture(self,key,prepared):
         ctl=self.controllers[key]
@@ -274,6 +336,7 @@ class ReplayCoordinator:
         self.position = 0
         self.targets.clear()
         self.messages.clear()
+        self.failed_files.clear();self.recovery_attempts.clear()
         self.state = 'live'
 
     @property
@@ -318,8 +381,11 @@ class ReplayCoordinator:
         self.load_started = self.now()
         self.targets = {}
         self.messages = {}
+        self.failed_files.clear();self.recovery_attempts.clear()
+        LOG.info('Replay seek generation=%s position=%.3f resume=%s',self.generation,self.position,resume)
         for key in self.participants:
             ctl = self.controllers[key]
+            if hasattr(ctl.loader,'clear_pending'):ctl.loader.clear_pending()
             self.bind(key)
             ctl.mode='replay';ctl.paused=True;ctl.ended=False;ctl.pending=None
             ctl.drawn=None;ctl._jump_t=None
@@ -339,6 +405,7 @@ class ReplayCoordinator:
         self.targets.clear()
         self.messages.clear()
         self.state='live'
+        self.failed_files.clear();self.recovery_attempts.clear()
         for ctl in self.controllers.values():
             ctl.to_live()
 
@@ -372,9 +439,11 @@ class ReplayCoordinator:
                 ctl=self.controllers[key]
                 info=ctl.loader.clip(seg['file'])
                 error=ctl.loader.error(seg['file'])
-                if info is None and not error and self.now()-self.load_started<35:
+                loading=ctl.loader.loading_name() if hasattr(ctl.loader,'loading_name') else ''
+                retrying=loading==seg['file'] and not (error or '').startswith('SegmentCorrupt')
+                if info is None and (not error or retrying) and self.now()-self.load_started<35:
                     waiting=True;continue
-                if info is None:self.messages[key]='片段不可用：'+(error or '加载超时')
+                if info is None:self.fail(key,seg,'片段不可用：'+(error or '加载超时'))
                 elif self.pool is None:ready[key]=(seg,info,pos)
                 else:
                     if key not in self.prepares:
@@ -382,7 +451,7 @@ class ReplayCoordinator:
                     future=self.prepares[key]
                     if not future.done():waiting=True;continue
                     try:ready[key]=future.result()
-                    except Exception as exc:self.messages[key]='解码失败：'+str(exc)
+                    except Exception as exc:self.fail(key,seg,'解码失败：'+str(exc))
             if waiting:return
             for key,value in ready.items():
                 ctl=self.controllers[key]
@@ -395,7 +464,7 @@ class ReplayCoordinator:
                     if ctl.cap is None or ctl.drawn is None:raise RuntimeError('无法解码目标帧')
                     self.messages.pop(key,None)
                 except Exception as exc:
-                    self.messages[key]='解码失败：'+str(exc)
+                    self.fail(key,self.targets[key][0],'解码失败：'+str(exc))
                     ctl.drawn=None
             self.targets.clear()
             self.anchor=self.now()
@@ -414,16 +483,23 @@ class ReplayCoordinator:
                 future=self.neighbors.get(key)
                 if future is None or not future.done():
                     if self.now()-self.load_started<35:return
-                    self.messages[key]='下一分段缓冲超时'
-                elif future.exception() is not None:self.messages[key]='下一分段不可用'
+                    LOG.warning('Next segment buffer timeout node=%s; keeping current segment playable',key)
+                elif future.exception() is not None:
+                    LOG.warning('Next segment buffer failed node=%s: %s',key,future.exception())
             self.anchor=self.now()
             self.state='playing' if self.resume_after_load else 'paused'
             return
         if self.state in ('playing','paused'):self.prefetch_neighbors()
+        if self.state=='paused':
+            for key in self.participants:
+                located=self.tracks[key].locate(self.origin+self.position)
+                if key in self.failed_files and located:self.recover(key,*located)
         if self.state != 'playing':return
         position=self.playhead()
         if position>=self.duration-.001:
-            self.position=self.duration;self.state='paused';return
+            self.position=self.duration;self.state='paused'
+            for ctl in self.controllers.values():ctl.paused=True
+            return
         for key in self.participants:
             ctl=self.controllers[key]
             located=self.tracks[key].locate(self.origin+position)
@@ -431,7 +507,7 @@ class ReplayCoordinator:
                 ctl.drawn=None;self.messages[key]='该时刻无录像';continue
             seg,pos=located
             if key in self.messages and not self.messages[key].startswith('该时刻'):
-                continue
+                if not self.recover(key,seg,pos):continue
             self.messages.pop(key,None)
             if (ctl.seg is None or ctl.seg['file']!=seg['file'] or ctl.cap is None):
                 neighbor=self.neighbors.get(key)
@@ -443,19 +519,30 @@ class ReplayCoordinator:
                         self.neighbors.pop(key)
                         self.install_capture(key,prepared)
                     except Exception as exc:
-                        self.messages[key]='解码失败：'+str(exc);continue
+                        self.neighbors.pop(key,None)
+                        self.fail(key,seg,'解码失败：'+str(exc));continue
                 else:
                     self.seek(position,True);return
             fps=ctl.fps
-            desired=int(round((pos-seg['start_s'])*fps))+1
+            # FPS is derived from packet timestamps. Rounding near the final
+            # half-frame must never request frame N+1 from an N-frame segment.
+            frame_limit=getattr(ctl,'frame_count',0) or seg['frames']
+            desired=min(frame_limit,max(1,int(round((pos-seg['start_s'])*fps))+1))
             due=max(0,desired-ctl.idx)
             if due>12:
-                ctl._jump(pos)
+                import cv2
+                target=desired-1
+                ok=ctl.cap.set(cv2.CAP_PROP_POS_FRAMES,target)
+                ok,frame=ctl.cap.read() if ok else (False,None)
+                if not ok:
+                    self.fail(key,seg,'回放定位失败，等待重试');continue
+                ctl.idx=target+1;ctl.drawn=ctl._fit(frame)
+                ctl.pos_s=seg['start_s']+ctl.idx/fps
             else:
                 for _ in range(min(6,due)):
                     ok,frame=ctl.cap.read()
                     if not ok:
-                        self.messages[key]='片段已结束或解码失败';break
+                        self.fail(key,seg,'片段未到时间轴末尾，但读取提前结束');break
                     ctl.idx+=1
                     ctl.drawn=ctl._fit(frame)
                     ctl.pos_s=seg['start_s']+ctl.idx/fps

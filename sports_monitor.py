@@ -13,7 +13,7 @@ import uuid
 import cv2
 
 import sports_theme as T
-from sports_widgets import RoundedCard,SoftButton,IconBadge,section_heading
+from sports_widgets import RoundedCard,SoftButton,IconBadge,section_heading,transport_state
 from studio_services_rk import fmt_hms
 from sports_replay import (Track, ReplayCoordinator, camera_catalog, grouped_sessions,
                            measure_clock, save_json)
@@ -229,7 +229,11 @@ class SportsMonitor:
                         activebackground=T.BG_PANEL,activeforeground=T.INFO_BLUE,
                         font=T.F_BODY,bd=0,highlightthickness=0).pack(anchor='w',pady=(0,5))
         row(playback,[('返回直播',self.go_live,None),('最近 10 秒',lambda:self.recent(10),None),('最近 30 秒',lambda:self.recent(30),None)])
-        row(playback,[('◀ 单帧',lambda:self.co.step(-1),None),('播放 / 暂停',self.co.pause,None),('单帧 ▶',lambda:self.co.step(1),None)])
+        transport=tk.Frame(playback,bg=T.BG_PANEL);transport.pack(fill='x',pady=3)
+        self.button(transport,'◀ 单帧',lambda:self.co.step(-1)).pack(side='left',fill='x',expand=True,padx=2)
+        self.play_button=SoftButton(transport,'播放',self.co.pause,color=T.INFO_BLUE_D,symbol='play')
+        self.play_button.pack(side='left',fill='x',expand=True,padx=2)
+        self.button(transport,'单帧 ▶',lambda:self.co.step(1)).pack(side='left',fill='x',expand=True,padx=2)
         rates=tk.Frame(playback,bg=T.BG_PANEL);rates.pack(fill='x',pady=(7,3))
         self.speed_buttons={}
         for speed in [.25,.5,1.,2.]:
@@ -831,6 +835,8 @@ class SportsMonitor:
                 self.draw_timeline()
                 modes={'live':'直播','playing':'联动回放' if self.co.linked else '单路回放','paused':'回放已暂停','loading':'正在共同定位…','buffering':'正在缓冲下一分段…'}
                 self.mode_label.config(text=modes[self.co.state],fg=T.LIVE_GREEN if self.co.state=='live' else T.WARN_AMBER)
+                symbol,label=transport_state(self.co.state,self.co.resume_after_load)
+                self.play_button.config(symbol=symbol,text=label)
                 self.top_clock.config(text=datetime.now().strftime('%Y-%m-%d  %H:%M:%S'))
                 self.selected_label.config(text='%s · %s\n2448 × 2048 原画幅'%(self.selected.upper(),self.ctls[self.selected].args.host))
                 count=sum(c.recording for c in self.controllers)
