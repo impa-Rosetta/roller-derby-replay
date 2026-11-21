@@ -609,7 +609,7 @@ class StudioController:
             except Exception:
                 pass
             self.cap = None
-        cap = cv2.VideoCapture(info['mkv'])
+        cap = self._open_capture(info)
         if not cap.isOpened():
             self._say('打开回放失败: %s' % info['mkv'])
             return
@@ -628,6 +628,9 @@ class StudioController:
         nxt = self._next_seg(seg)
         if nxt is not None:
             self.loader.request(nxt, idle_only=True)
+
+    def _open_capture(self, info):
+        return cv2.VideoCapture(info['mkv'])
 
     def _safe_seek_target(self, t):
         """把跳转落点挪离段尾：落在段最后 0.5s 内时回退到段起点后 1s。

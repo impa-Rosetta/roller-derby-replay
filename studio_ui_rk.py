@@ -206,13 +206,14 @@ class StatusBadge(tk.Frame):
 # ---------------------------------------------------------------------------
 
 class StudioUI:
-    def __init__(self, root, controller, args):
+    def __init__(self, root, controller, args, embedded=False):
         global _DPI_SCALE
         _DPI_SCALE = max(1.0, min(1.25, float(
             root.tk.call('tk', 'scaling')) / 1.3333))
         self.root = root
         self.ctl = controller      # StudioController：提供状态与动作
         self.args = args
+        self.embedded = embedded
         self._photo = None
         self._img_id = None
         self._placeholder_id = None
@@ -226,17 +227,19 @@ class StudioUI:
         self._tl_hover = None
         self._dialog_open = False   # 模态框开着时别再弹
 
-        root.title('RK3588 赛事监看台 · %s' % args.host)
         root.configure(bg=T.BG_APP)
-        root.geometry('%dx%d' % (args.window_width, args.window_height))
-        root.minsize(1100, 720)
+        if not embedded:
+            root.title('RK3588 赛事监看台 · %s' % args.host)
+            root.geometry('%dx%d' % (args.window_width, args.window_height))
+            root.minsize(1100, 720)
 
         self._build_topbar()
         self._build_body()
         self._build_controlbar()
 
-        root.protocol('WM_DELETE_WINDOW', self.ctl.request_quit)
-        self._bind_keys()
+        if not embedded:
+            root.protocol('WM_DELETE_WINDOW', self.ctl.request_quit)
+            self._bind_keys()
 
     def _bind_keys(self):
         """键盘快捷键：裁判现场单手操作"""
@@ -567,7 +570,8 @@ class StudioUI:
     # ---------- 底栏 ----------
     def _build_controlbar(self):
         tk.Frame(self.root, bg=T.BORDER, height=1).pack(side='top', fill='x')
-        bar = tk.Frame(self.root, bg=T.BG_PANEL, height=px(104))
+        bar = tk.Frame(self.root, bg=T.BG_PANEL,
+                       height=px(150 if self.embedded else 104))
         bar.pack(side='bottom', fill='x')
         bar.pack_propagate(False)
 
@@ -594,6 +598,11 @@ class StudioUI:
         self.btn_close = mkbtn('关闭录像',
                                lambda: self.ctl.close_session(),
                                'normal', 92)
+        if self.embedded:
+            # The unified window has a navigation bar; keep every playback
+            # control visible even on a 1200-pixel-wide desktop.
+            row = tk.Frame(bar, bg=T.BG_PANEL)
+            row.pack(fill='x', padx=px(12), pady=(0, px(4)))
         self.btn_play = mkbtn('▶ 播放', self.ctl.toggle_play, 'normal', 88)
         self.btn_back = mkbtn('◀ 帧', lambda: self.ctl.step(-1), 'normal', 66)
         self.btn_fwd = mkbtn('帧 ▶', lambda: self.ctl.step(1), 'normal', 66)
@@ -1096,7 +1105,7 @@ class _ModalDialog(tk.Toplevel):
         self.title(title)
         self.configure(bg=T.BG_APP)
         self.resizable(False, False)
-        self.transient(parent)
+        self.transient(parent.winfo_toplevel())
         self.result = None
         w, h = px(width), px(height)
         px_r, py_r = parent.winfo_rootx(), parent.winfo_rooty()

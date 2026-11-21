@@ -4,7 +4,7 @@
 
 ## 架构
 每台RK3588接一台Hikrobot USB3相机，采集2448×2048 BayerGR8约59.2fps；CPU去马赛克/转NV12，FFmpeg hevc_rkmpp硬编HEVC CBR 30Mbps。录像写节点本地，原分辨率主码流经9101到DGX；DGX NVDEC解码并本地缩放。无需第二路缩略编码，thumb-port必须为0。
-支持为4台节点分别启动独立监看窗口；不是四机同步触发采集或一个四画面总控窗口。
+支持同一个窗口内四宫格直播、点击放大及各路独立回放；也保留单路窗口入口。不提供四机同步触发采集。详见 [四路监看台](docs/FOUR_CAMERA_MONITOR.md)。
 
 ## 快速开始：DGX
 ```bash
@@ -13,7 +13,8 @@ cp nodes.example.json nodes.local.json
 bash deploy/bootstrap.sh dgx --install-packages
 python3 deploy/check_env.py --role dgx
 python3 deploy/deploy_node.py --config nodes.local.json --node rk2
-./run_studio.sh --config nodes.local.json --node rk2
+./run_multi.sh --config nodes.local.json
+# 仅打开一台时：./run_studio.sh --config nodes.local.json --node rk2
 ```
 DGX的NVIDIA驱动/NVDEC来自DGX系统，普通Ubuntu安装GStreamer包不保证有nvh265dec。不要用安装CPU版opencv的pip环境替代系统Python。
 
@@ -30,7 +31,7 @@ DGX的NVIDIA驱动/NVDEC来自DGX系统，普通Ubuntu安装GStreamer包不保�
 - USB长期可靠性尚未解决：参考节点曾运行约52分钟后usb_submit_urb返回-19(ENODEV)。启动前DeviceReset是恢复措施，不是根因修复；录制中不自动重启来掩盖丢帧。
 - 录制连续5次取帧失败会写camera_alarm.json并退出；启动须确认实际编码输出，不能只看进程存活。
 - 异常退出尾段元数据可能时长为0，视频可能可解码；恢复原始文件前请备份，尚未修复此问题。
-- 已验证单节点约59.2fps；尚未完成四节点并发压力测试。每路30Mbps，四路约120Mbps；归档/回放突发流量需要另行限速。
+- 已完成四节点短时并发直播和独立回放验收；未完成四节点一小时以上长稳测试。每路30Mbps，四路约120Mbps；归档/回放突发流量需要另行限速。
 - 整场时间轴默认从0秒自动缩放，直播计时跟随新画面，历史回放不会只剩最近十分钟。
 
 ## 验证
