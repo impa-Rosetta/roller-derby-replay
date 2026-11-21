@@ -500,6 +500,9 @@ class MultiMonitor:
 
 
 def main():
+    # Tk/X11 uses XIM, not GTK's input-method bridge. SSH launches may omit it.
+    if not os.environ.get('XMODIFIERS'):
+        os.environ['XMODIFIERS'] = '@im=ibus'
     parser = argparse.ArgumentParser(description='RK3588 四路统一监看台')
     parser.add_argument('--config', default=str(Path(__file__).with_name('nodes.local.json')))
     parser.add_argument('--no-pad', action='store_true', help='关闭平板 HTTP 服务')
