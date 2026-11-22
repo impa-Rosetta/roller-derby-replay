@@ -140,7 +140,7 @@ class SportsMonitor:
         self.catalog_generation=0
         self.after_stop=False;self.last_save=0;self.last_health=0;self.last_render=0
         self.message='读取录像…'
-        self.zoom=1.;self.view_start=0.;self.drag=None;self.drag_resume=True
+        self.zoom=1.;self.view_start=0.;self.timeline_auto_fit=True;self.drag=None;self.drag_resume=True
         self.pads=[]
         self.storage_manager=None
         root.title('RK3588 体育赛事回放平台')
@@ -177,7 +177,8 @@ class SportsMonitor:
         toolbar=tk.Frame(bottom,bg=T.BG_PANEL);toolbar.pack(fill='x',pady=(0,3))
         self.position_label=tk.Label(toolbar,text='00:00:00 / 00:00:00',font=T.F_HUD,bg=T.BG_PANEL,fg=T.INFO_BLUE)
         self.position_label.pack(side='left')
-        self.button(toolbar,'全程',self.fit_timeline).pack(side='right',padx=3)
+        self.fit_button=self.button(toolbar,'全程自适应',self.fit_timeline,T.INFO_BLUE_D)
+        self.fit_button.pack(side='right',padx=3)
         self.button(toolbar,'−',lambda:self.change_zoom(1/1.5)).pack(side='right',padx=3)
         self.button(toolbar,'＋',lambda:self.change_zoom(1.5)).pack(side='right',padx=3)
         self.timeline=tk.Canvas(bottom,bg=T.BG_PANEL,height=112,highlightthickness=0)
@@ -187,11 +188,8 @@ class SportsMonitor:
         self.timeline.bind('<ButtonRelease-1>',self.timeline_release)
         self.timeline.bind('<Motion>',self.timeline_hover)
         self.timeline.bind('<Leave>',self.timeline_leave)
-        self.timeline.bind('<MouseWheel>',lambda e:self.change_zoom(1.5 if e.delta>0 else 1/1.5))
-        self.timeline.bind('<Button-4>',lambda e:self.change_zoom(1.5))
-        self.timeline.bind('<Button-5>',lambda e:self.change_zoom(1/1.5))
-        self.timeline.bind('<Shift-Button-4>',lambda e:self.pan(-.15))
-        self.timeline.bind('<Shift-Button-5>',lambda e:self.pan(.15))
+        for sequence in ['<MouseWheel>','<Button-4>','<Button-5>']:
+            self.timeline.bind(sequence,self.timeline_wheel)
         self.stage=tk.Frame(root,bg=T.BG_APP);self.stage.pack(fill='both',expand=True,padx=12,pady=10)
         self.matrix=tk.Frame(self.stage,bg=T.VIDEO_BG)
         self.side=tk.Frame(self.stage,bg=T.BG_APP)
@@ -1016,21 +1014,35 @@ class SportsMonitor:
         if path:save_json(path,dict(match=self.match_name,events=self.events,match_clock=self.game_clock.dump()))
 
     def timeline_range(self):
-        total=max(1,self.co.duration);span=max(.5,total/self.zoom)
+        total=max(1,self.co.duration)
+        if getattr(self,'timeline_auto_fit',self.zoom==1):
+            self.zoom=1.;self.view_start=0.;return 0.,total
+        span=max(.5,total/self.zoom)
         self.view_start=max(0,min(total-span,self.view_start))
         return self.view_start,span
 
     def fit_timeline(self):
-        self.zoom=1.;self.view_start=0.
+        self.timeline_auto_fit=True;self.zoom=1.;self.view_start=0.
 
     def change_zoom(self,factor):
         center=self.co.playhead()
         self.zoom=max(1,min(1000,self.zoom*factor))
+        self.timeline_auto_fit=self.zoom==1
         span=max(1,self.co.duration)/self.zoom
         self.view_start=max(0,center-span/2)
 
     def pan(self,fraction):
+        if getattr(self,'timeline_auto_fit',self.zoom==1):return
         start,span=self.timeline_range();self.view_start=start+span*fraction
+
+    def timeline_wheel(self,event):
+        # Normal scrolling must never hide the beginning of the match.
+        if not (getattr(event,'state',0)&0x4):return 'break'
+        delta=getattr(event,'delta',0)
+        direction=1 if delta>0 or getattr(event,'num',0)==4 else -1
+        if getattr(event,'state',0)&0x1:self.pan(-.15*direction)
+        else:self.change_zoom(1.5 if direction>0 else 1/1.5)
+        return 'break'
 
     def timeline_time(self,x):
         start,span=self.timeline_range()
@@ -1121,6 +1133,8 @@ class SportsMonitor:
             canvas.create_line(xx,16,xx,108,fill=T.INFO_BLUE,width=2,tags='playhead')
             canvas.create_polygon(xx-5,16,xx+5,16,xx,23,fill=T.INFO_BLUE,tags='playhead')
         self.position_label.config(text=self.playback_time_text())
+        if hasattr(self,'fit_button'):
+            self.fit_button.config(bg=T.INFO_BLUE_D if self.timeline_auto_fit else T.BG_RAISED)
         self.draw_timeline_hover()
 
     def drain(self):
@@ -1163,6 +1177,7 @@ class SportsMonitor:
         save_json(self.state_root/'multi-health.json',dict(updated=time.time(),
             platform='sports',view=self.focused or 'grid',state=self.co.state,
             linked=self.co.linked,position=self.co.playhead(),duration=self.co.duration,
+            timeline_auto_fit=self.timeline_auto_fit,timeline_range=self.timeline_range(),
             match=self.match_id,batch_busy=self.batch_busy,
             match_clock=self.game_clock.dump(),match_elapsed=self.game_clock.current(),
             nodes={k:dict(alive=c.feed.alive(),fps=c.live_fps(),image_n=c.feed.image_n,
