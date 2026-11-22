@@ -1,0 +1,167 @@
+{
+  "screen": {
+    "resolution": "2560x1440",
+    "refresh_hz": 59.95
+  },
+  "metric": "Distinct live video frames submitted through ImageTk per wall-clock second, not external panel scanout measurement.",
+  "results": [
+    {
+      "view": "grid",
+      "seconds": 60.06786261394154,
+      "display_fps": {
+        "rk1": 58.67,
+        "rk2": 59.17,
+        "rk3": 59.23,
+        "rk4": 59.08
+      },
+      "decoded_fps": {
+        "rk1": 59.22,
+        "rk2": 59.22,
+        "rk3": 59.27,
+        "rk4": 59.22
+      },
+      "skipped_compressed_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 0,
+        "rk4": 0
+      },
+      "alive": {
+        "rk1": true,
+        "rk2": true,
+        "rk3": true,
+        "rk4": true
+      }
+    },
+    {
+      "view": "rk1",
+      "seconds": 15.006271360907704,
+      "display_fps": {
+        "rk1": 59.18,
+        "rk2": 0.0,
+        "rk3": 0.0,
+        "rk4": 0.0
+      },
+      "decoded_fps": {
+        "rk1": 59.24,
+        "rk2": 59.04,
+        "rk3": 59.18,
+        "rk4": 59.24
+      },
+      "skipped_compressed_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 0,
+        "rk4": 0
+      },
+      "alive": {
+        "rk1": true,
+        "rk2": true,
+        "rk3": true,
+        "rk4": true
+      }
+    },
+    {
+      "view": "rk2",
+      "seconds": 15.081539858016185,
+      "display_fps": {
+        "rk1": 0.0,
+        "rk2": 59.08,
+        "rk3": 0.0,
+        "rk4": 0.0
+      },
+      "decoded_fps": {
+        "rk1": 59.21,
+        "rk2": 59.15,
+        "rk3": 59.21,
+        "rk4": 59.21
+      },
+      "skipped_compressed_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 0,
+        "rk4": 0
+      },
+      "alive": {
+        "rk1": true,
+        "rk2": true,
+        "rk3": true,
+        "rk4": true
+      }
+    },
+    {
+      "view": "rk3",
+      "seconds": 15.003038762952201,
+      "display_fps": {
+        "rk1": 0.0,
+        "rk2": 0.0,
+        "rk3": 59.19,
+        "rk4": 0.0
+      },
+      "decoded_fps": {
+        "rk1": 59.19,
+        "rk2": 59.12,
+        "rk3": 59.19,
+        "rk4": 59.12
+      },
+      "skipped_compressed_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 0,
+        "rk4": 0
+      },
+      "alive": {
+        "rk1": true,
+        "rk2": true,
+        "rk3": true,
+        "rk4": true
+      }
+    },
+    {
+      "view": "rk4",
+      "seconds": 15.064980841008946,
+      "display_fps": {
+        "rk1": 0.0,
+        "rk2": 0.0,
+        "rk3": 0.0,
+        "rk4": 59.01
+      },
+      "decoded_fps": {
+        "rk1": 59.14,
+        "rk2": 59.28,
+        "rk3": 59.21,
+        "rk4": 59.14
+      },
+      "skipped_compressed_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 0,
+        "rk4": 0
+      },
+      "alive": {
+        "rk1": true,
+        "rk2": true,
+        "rk3": true,
+        "rk4": true
+      }
+    }
+  ],
+  "capture_summary": {
+    "rk1": [
+      "录制结束: 取 8539 帧 / 144.23 秒 = 59.2 FPS，相机丢帧 0，编码输入丢帧 0，超时 0",
+      "编码 8539 帧 = 59.2 FPS，143 个关键帧，总 535.2 MB = 29.68 Mbps"
+    ],
+    "rk2": [
+      "录制结束: 取 8527 帧 / 144.07 秒 = 59.2 FPS，相机丢帧 0，编码输入丢帧 0，超时 0",
+      "编码 8527 帧 = 59.2 FPS，143 个关键帧，总 533.4 MB = 29.62 Mbps"
+    ],
+    "rk3": [
+      "录制结束: 取 8523 帧 / 144.00 秒 = 59.2 FPS，相机丢帧 0，编码输入丢帧 0，超时 0",
+      "编码 8523 帧 = 59.2 FPS，143 个关键帧，总 534.2 MB = 29.68 Mbps"
+    ],
+    "rk4": [
+      "录制结束: 取 8528 帧 / 144.02 秒 = 59.2 FPS，相机丢帧 0，编码输入丢帧 0，超时 0",
+      "编码 8528 帧 = 59.2 FPS，143 个关键帧，总 534.0 MB = 29.66 Mbps"
+    ]
+  }
+}
