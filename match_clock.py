@@ -15,7 +15,7 @@ def mmss(seconds):
 
 class MatchClock:
     def __init__(self,data=None,wall=time.time,monotonic=time.monotonic):
-        self.wall=wall;self.monotonic=monotonic;self.transitions=[]
+        self.wall=wall;self.monotonic=monotonic;self.transitions=[];self.ended_wall=None
         if data:
             if data.get('version')!=1:raise ValueError('Unsupported match clock version')
             for item in data.get('transitions',[]):
@@ -27,6 +27,11 @@ class MatchClock:
                 self.transitions.append(dict(wall=w,elapsed=elapsed,running=running))
             if self.transitions and (self.transitions[0]['elapsed']!=0 or not self.transitions[0]['running']):
                 raise ValueError('Match clock must start running at zero')
+            if data.get('ended_wall') is not None:
+                self.ended_wall=float(data['ended_wall'])
+                if (not math.isfinite(self.ended_wall) or not self.transitions or
+                    self.transitions[-1]['running'] or self.ended_wall!=self.transitions[-1]['wall']):
+                    raise ValueError('Invalid match end time')
         self._walls=[t['wall'] for t in self.transitions]
         self._mono_anchor=monotonic()
         self._elapsed_anchor=max(0,self.at(wall())[0]) if self.started else 0.
@@ -35,13 +40,17 @@ class MatchClock:
     def started(self):return bool(self.transitions)
 
     @property
-    def running(self):return self.started and self.transitions[-1]['running']
+    def running(self):return self.started and not self.ended and self.transitions[-1]['running']
+
+    @property
+    def ended(self):return self.ended_wall is not None
 
     def current(self):
         return self._elapsed_anchor+max(0,self.monotonic()-self._mono_anchor) if self.running else self._elapsed_anchor
 
     def at(self,wall):
         if not self.started:return 0.,'unstarted'
+        if self.ended and wall>=self.ended_wall:return self.transitions[-1]['elapsed'],'ended'
         i=bisect_right(self._walls,wall)-1
         if i<0:return wall-self.transitions[0]['wall'],'before'
         item=self.transitions[i]
@@ -51,7 +60,7 @@ class MatchClock:
     def label_at(self,wall):
         seconds,phase=self.at(wall)
         if phase=='unstarted':return '未开始'
-        return ('赛前 ' if phase=='before' else '暂停 ' if phase=='paused' else '')+mmss(seconds)
+        return ('赛前 ' if phase=='before' else '暂停 ' if phase=='paused' else '赛后 ' if phase=='ended' else '')+mmss(seconds)
 
     def start(self):
         if self.started:return False
@@ -62,8 +71,12 @@ class MatchClock:
         self._append(False,self.current());return True
 
     def resume(self):
-        if not self.started or self.running:return False
+        if not self.started or self.running or self.ended:return False
         self._append(True,self.current());return True
+
+    def finish(self):
+        if not self.started or self.ended:return False
+        self._append(False,self.current());self.ended_wall=self.transitions[-1]['wall'];return True
 
     def _append(self,running,elapsed):
         wall=max(self.wall(),self._walls[-1] if self._walls else -math.inf)
@@ -71,8 +84,17 @@ class MatchClock:
         self._elapsed_anchor=elapsed;self._mono_anchor=self.monotonic()
 
     def dump(self):
-        return dict(version=1,transitions=[dict(t) for t in self.transitions])
+        return dict(version=1,transitions=[dict(t) for t in self.transitions],ended_wall=self.ended_wall)
+
+    def event(self,index,origin=0,note=None):
+        item=self.transitions[index]
+        kind=('match_end' if self.ended and index==len(self.transitions)-1 else
+              'match_start' if index==0 else 'match_resume' if item['running'] else 'match_pause')
+        names=dict(match_start='比赛开始',match_pause='比赛暂停',match_resume='比赛继续',match_end='比赛结束')
+        return dict(kind=kind,clock_transition=index,wall=item['wall'],match_elapsed=item['elapsed'],
+                    position=max(0,item['wall']-origin) if origin else 0,note=note or names[kind])
 
     def paused_intervals(self,end):
-        return [(t['wall'],self.transitions[i+1]['wall'] if i+1<len(self.transitions) else end)
+        end=min(end,self.ended_wall) if self.ended else end
+        return [(t['wall'],min(end,self.transitions[i+1]['wall']) if i+1<len(self.transitions) else end)
                 for i,t in enumerate(self.transitions) if not t['running'] and t['wall']<end]

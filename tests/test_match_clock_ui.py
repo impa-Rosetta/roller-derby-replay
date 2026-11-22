@@ -73,6 +73,14 @@ class MatchClockIntegrationTests(unittest.TestCase):
         self.assertEqual(app.match_id,'game');self.assertTrue(app.game_clock.started)
         self.assertTrue(track.calibrated);self.assertEqual(app.co.origin,1000)
         self.assertEqual(app.match_time_label(100),'00:00')
+        # Import lifecycle events from old metadata once; an operator deletion
+        # must not be undone by opening the match again.
+        path=app.state_root/'matches/game.json';saved=json.loads(path.read_text())
+        saved.pop('clock_events_imported');saved['events']=[];path.write_text(json.dumps(saved))
+        app.use_group({'rk1':track},'恢复');self.assertEqual(len(app.events),1)
+        self.assertEqual(app.events[0]['kind'],'match_start')
+        app.events=[];app.save_match();app.use_group({'rk1':track},'恢复')
+        self.assertEqual(app.events,[])
 
     def test_stopping_recording_freezes_its_saved_clock_while_reviewing_other_match(self):
         app=self.app;app.start_game_clock();self.wall+=20;self.mono+=20
@@ -83,6 +91,48 @@ class MatchClockIntegrationTests(unittest.TestCase):
         self.assertFalse(saved['match_clock']['transitions'][-1]['running'])
         self.assertEqual(saved['match_clock']['transitions'][-1]['elapsed'],20)
         self.assertFalse(app.game_clock.started)
+
+    def test_lifecycle_actions_create_events_once_and_finish_does_not_stop_recording(self):
+        app=self.app;app.start_game_clock();app.start_game_clock();self.wall+=20;self.mono+=20
+        app.toggle_game_clock();self.wall+=10;self.mono+=10;app.toggle_game_clock()
+        self.wall+=5;self.mono+=5
+        with patch('sports_monitor.messagebox.askyesno',return_value=True):app.finish_game_clock();app.finish_game_clock()
+        app.toggle_game_clock()
+        self.assertEqual([e['kind'] for e in app.events],['match_start','match_pause','match_resume','match_end'])
+        self.assertEqual([e['position'] for e in app.events],[100,120,130,135])
+        self.assertEqual([e['match_elapsed'] for e in app.events],[0,20,20,25])
+        self.assertTrue(app.ctls['rk1'].recording);self.assertTrue(app.game_clock.ended)
+        saved=json.loads((app.state_root/'matches/game.json').read_text())
+        self.assertEqual(len(saved['events']),4);self.assertTrue(saved['clock_events_imported'])
+
+    def test_cancel_finish_does_not_change_clock_or_events(self):
+        self.app.start_game_clock()
+        with patch('sports_monitor.messagebox.askyesno',return_value=False):self.app.finish_game_clock()
+        self.assertFalse(self.app.game_clock.ended);self.assertEqual(len(self.app.events),1)
+
+    def test_clock_event_created_before_first_segment_rebases_from_wall_after_video_arrives(self):
+        app=self.app;app.co.tracks={};app.pending_new=True;app.active_paths={'rk1':'/record/new'}
+        app.start_game_clock();self.assertEqual(app.events[0]['position'],0)
+        app.co.tracks={'rk1':self.track};app.co.origin=1050;app.save_match()
+        self.assertEqual(app.events[0]['position'],50)
+        app.co.origin=1040;app.save_match();self.assertEqual(app.events[0]['position'],60)
+
+    def test_playback_label_uses_actual_frame_while_live_clock_keeps_advancing(self):
+        app=self.app;app.start_game_clock();app.selected='rk1';app.drag=None;app.co.state='paused'
+        app.ctls['rk1'].seg=dict(start_s=100);app.ctls['rk1'].idx=61;app.ctls['rk1'].fps=60
+        self.track.wall_for_position=Mock(return_value=1101)
+        self.assertEqual(app.playback_time_text(),'回放 00:01')
+        self.track.wall_for_position.assert_called_with(101)
+        self.wall+=200;self.mono+=200
+        self.assertEqual(app.game_clock.current(),200);self.assertEqual(app.playback_time_text(),'回放 00:01')
+        app.co.state='loading';self.assertEqual(app.playback_time_text(),'回放定位中')
+        app.drag=120;self.assertEqual(app.playback_time_text(),'定位 00:20')
+
+    def test_unsealed_lifecycle_event_does_not_jump_to_wrong_video(self):
+        app=self.app;app.start_game_clock();app.events[0]['wall']=1250
+        app.event_list=Mock();app.event_list.curselection.return_value=(0,);app.co.seek=Mock()
+        app.jump_event();app.co.seek.assert_not_called()
+        app.co.duration=300;app.jump_event();app.co.seek.assert_called_once_with(250,False)
 
 
 @unittest.skipUnless(os.environ.get('DISPLAY'),'Requires X11 DISPLAY')
