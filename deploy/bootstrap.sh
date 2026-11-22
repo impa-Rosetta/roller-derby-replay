@@ -5,7 +5,7 @@ role=${1:?Usage: bootstrap.sh node|dgx [--install-packages]}
 if [[ "${2:-}" == --install-packages ]]; then
  sudo -n apt-get update
  packages=(python3 python3-av python3-numpy python3-opencv openssh-client rsync)
- if [[ "$role" == dgx ]]; then packages+=(python3-tk python3-gi gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools gstreamer1.0-plugins-bad); fi
+ if [[ "$role" == dgx ]]; then packages+=(python3-tk python3-pil python3-pil.imagetk python3-gi gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools gstreamer1.0-plugins-bad); fi
  sudo -n apt-get install -y "${packages[@]}"
 fi
 if [[ "$role" == node ]]; then

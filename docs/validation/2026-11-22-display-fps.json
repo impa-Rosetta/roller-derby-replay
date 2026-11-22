@@ -1,0 +1,140 @@
+{
+  "screen": {
+    "resolution": "2560x1440",
+    "refresh_hz": 59.95
+  },
+  "metric": "Distinct source frames submitted through ImageTk per wall-clock second; not nominal decoder FPS or independently measured panel scanout.",
+  "footage": "Existing four-camera approximately 65-minute test; normal 1x playback starting at match position 1800 seconds.",
+  "results": [
+    {
+      "view": "grid",
+      "seconds": 60.02609559893608,
+      "co_state": "playing",
+      "messages": {},
+      "fps": {
+        "rk1": 59.21,
+        "rk2": 59.14,
+        "rk3": 59.17,
+        "rk4": 59.14
+      },
+      "tick_ms_p50": 0.75,
+      "tick_ms_max": 6.29,
+      "paint_ms": {
+        "rk1": 1.79,
+        "rk2": 1.78,
+        "rk3": 1.79,
+        "rk4": 1.74
+      },
+      "skipped_frames": {
+        "rk1": 1,
+        "rk2": 1,
+        "rk3": 1,
+        "rk4": 2
+      }
+    },
+    {
+      "view": "rk1",
+      "seconds": 20.052438833983615,
+      "co_state": "playing",
+      "messages": {},
+      "fps": {
+        "rk1": 59.24,
+        "rk2": 0.0,
+        "rk3": 0.0,
+        "rk4": 0.0
+      },
+      "tick_ms_p50": 0.84,
+      "tick_ms_max": 8.58,
+      "paint_ms": {
+        "rk1": 4.91,
+        "rk2": 1.78,
+        "rk3": 1.79,
+        "rk4": 1.74
+      },
+      "skipped_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 0,
+        "rk4": 0
+      }
+    },
+    {
+      "view": "rk2",
+      "seconds": 20.003038926050067,
+      "co_state": "playing",
+      "messages": {},
+      "fps": {
+        "rk1": 0.0,
+        "rk2": 58.99,
+        "rk3": 0.0,
+        "rk4": 0.0
+      },
+      "tick_ms_p50": 0.96,
+      "tick_ms_max": 5.37,
+      "paint_ms": {
+        "rk1": 4.91,
+        "rk2": 6.2,
+        "rk3": 1.79,
+        "rk4": 1.74
+      },
+      "skipped_frames": {
+        "rk1": 0,
+        "rk2": 2,
+        "rk3": 0,
+        "rk4": 0
+      }
+    },
+    {
+      "view": "rk3",
+      "seconds": 20.059861576999538,
+      "co_state": "playing",
+      "messages": {},
+      "fps": {
+        "rk1": 0.0,
+        "rk2": 0.0,
+        "rk3": 59.17,
+        "rk4": 0.0
+      },
+      "tick_ms_p50": 0.99,
+      "tick_ms_max": 6.4,
+      "paint_ms": {
+        "rk1": 4.91,
+        "rk2": 6.2,
+        "rk3": 7.32,
+        "rk4": 1.74
+      },
+      "skipped_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 1,
+        "rk4": 0
+      }
+    },
+    {
+      "view": "rk4",
+      "seconds": 20.043262029066682,
+      "co_state": "playing",
+      "messages": {},
+      "fps": {
+        "rk1": 0.0,
+        "rk2": 0.0,
+        "rk3": 0.0,
+        "rk4": 59.22
+      },
+      "tick_ms_p50": 1.22,
+      "tick_ms_max": 10.18,
+      "paint_ms": {
+        "rk1": 4.91,
+        "rk2": 6.2,
+        "rk3": 7.32,
+        "rk4": 7.24
+      },
+      "skipped_frames": {
+        "rk1": 0,
+        "rk2": 0,
+        "rk3": 0,
+        "rk4": 0
+      }
+    }
+  ]
+}

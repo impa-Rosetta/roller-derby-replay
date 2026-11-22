@@ -3,7 +3,7 @@
 import argparse,importlib,subprocess,json,os,platform
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--role',choices=['node','dgx'],required=True);p.add_argument('--require-camera',action='store_true');a=p.parse_args();errors=[];info={'role':a.role,'architecture':platform.machine()}
-for name in (['av','cv2','numpy'] if a.role=='node' else ['av','cv2','numpy','tkinter','gi']):
+for name in (['av','cv2','numpy'] if a.role=='node' else ['av','cv2','numpy','tkinter','gi','PIL.Image','PIL.ImageTk']):
     try:m=importlib.import_module(name);info[name]=getattr(m,'__version__','available')
     except ImportError as e:errors.append(str(e))
 if a.role=='node':

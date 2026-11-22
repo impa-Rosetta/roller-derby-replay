@@ -1,5 +1,6 @@
 """Sports replay desk: compact native-aspect views, shared transport and timeline."""
 import concurrent.futures
+from collections import deque
 from datetime import datetime
 import json
 import logging
@@ -11,6 +12,7 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 import uuid
 
 import cv2
+from PIL import Image, ImageTk
 
 import sports_theme as T
 from sports_widgets import RoundedCard,SoftButton,IconBadge,section_heading,transport_state
@@ -32,6 +34,8 @@ class CameraSurface:
         self.canvas=tk.Canvas(parent,bg=T.VIDEO_BG,highlightthickness=1,
                               highlightbackground=T.BORDER,cursor='hand2')
         self.photo=None;self.last=None;self.signature=None
+        self.photo_size=None;self.presented=deque(maxlen=240);self.presented_count=0
+        self.paint_ms=deque(maxlen=240);self.image_item=None;self.hud_signature=None
         self.canvas.bind('<Button-1>',lambda e:app.select(key))
         self.canvas.bind('<Double-Button-1>',lambda e:app.focus_camera(key))
 
@@ -49,34 +53,57 @@ class CameraSurface:
         sig=(id(img),w,h,replay,note,alive,c.recording,self.app.selected,
              int(co.playhead()) if replay else int(c.feed.image_t))
         if sig==self.signature:return
+        fresh=img is not None and img is not self.last
         self.signature=sig;self.last=img
-        canvas=self.canvas;canvas.delete('all')
+        started=time.monotonic()
+        canvas=self.canvas
         canvas.config(highlightbackground=T.INFO_BLUE if self.app.selected==self.key else T.BORDER)
         if img is not None:
             ih,iw=img.shape[:2];s=min(w/iw,h/ih)
             nw,nh=max(1,int(iw*s)),max(1,int(ih*s))
             rgb=cv2.cvtColor(cv2.resize(img,(nw,nh)),cv2.COLOR_BGR2RGB)
-            if self.photo is None:self.photo=tk.PhotoImage(master=canvas)
-            self.photo.configure(width=nw,height=nh)
-            self.photo.put(b'P6 %d %d 255\n'%(nw,nh)+rgb.tobytes(),to=(0,0))
-            canvas.create_image(w//2,h//2,image=self.photo)
+            image=Image.fromarray(rgb)
+            if self.photo is None or self.photo_size!=(nw,nh):
+                self.photo=ImageTk.PhotoImage(image,master=canvas);self.photo_size=(nw,nh)
+                if self.image_item is None:self.image_item=canvas.create_image(w//2,h//2,image=self.photo)
+                else:canvas.itemconfigure(self.image_item,image=self.photo)
+            else:self.photo.paste(image)
+            canvas.coords(self.image_item,w//2,h//2);canvas.itemconfigure(self.image_item,state='normal')
+            canvas.delete('empty')
         else:
+            if self.image_item is not None:canvas.itemconfigure(self.image_item,state='hidden')
+            canvas.delete('empty')
             text=note or ('等待相机直播' if c.recording else '录像已停止 · 可选择赛事回放')
-            canvas.create_text(w//2,h//2,text=text,fill=T.VIDEO_MUTED,font=T.F_BODY,width=max(80,w-30))
-        canvas.create_rectangle(0,0,w,27,fill=T.VIDEO_HEADER,outline='')
-        canvas.create_text(12,13,text=self.key.upper(),fill=T.VIDEO_FG,anchor='w',font=T.F_TITLE)
+            canvas.create_text(w//2,h//2,text=text,fill=T.VIDEO_MUTED,font=T.F_BODY,width=max(80,w-30),tags='empty')
         status=('REC ●' if c.recording else '已停止')+'  '+('回放' if replay else '直播')
-        canvas.create_text(w-10,13,text=status,fill='#ff8b9a' if c.recording else T.VIDEO_MUTED,
-                           anchor='e',font=T.F_SMALL)
+        text=''
         if img is not None:
             text=note or (tc(co.playhead()) if replay else '%.1f fps'%c.live_fps())
             if not replay and not alive:text='直播中断 · 等待恢复'
-            canvas.create_rectangle(0,h-25,w,h,fill=T.VIDEO_HEADER,outline='')
-            canvas.create_text(10,h-13,text=text,anchor='w',fill=T.VIDEO_FG,font=T.F_SMALL)
+        hud=(w,h,status,text,c.recording)
+        if hud!=self.hud_signature:
+            self.hud_signature=hud;canvas.delete('hud')
+            canvas.create_rectangle(0,0,w,27,fill=T.VIDEO_HEADER,outline='',tags='hud')
+            canvas.create_text(12,13,text=self.key.upper(),fill=T.VIDEO_FG,anchor='w',font=T.F_TITLE,tags='hud')
+            canvas.create_text(w-10,13,text=status,fill='#ff8b9a' if c.recording else T.VIDEO_MUTED,
+                               anchor='e',font=T.F_SMALL,tags='hud')
+            if text:
+                canvas.create_rectangle(0,h-25,w,h,fill=T.VIDEO_HEADER,outline='',tags='hud')
+                canvas.create_text(10,h-13,text=text,anchor='w',fill=T.VIDEO_FG,font=T.F_SMALL,tags='hud')
+        canvas.tag_raise('hud')
+        if fresh:
+            self.presented.append(time.monotonic());self.presented_count+=1
+            self.paint_ms.append((time.monotonic()-started)*1000)
+
+    def display_fps(self):
+        now=time.monotonic()
+        samples=[t for t in self.presented if now-t<2]
+        return (len(samples)-1)/(samples[-1]-samples[0]) if len(samples)>1 else 0.
 
 
 class SportsMonitor:
     def __init__(self,root,nodes,controllers,state_root,pad_enabled=True):
+        cv2.setNumThreads(max(1,min(4,cv2.getNumberOfCPUs())))
         self.root,self.nodes=root,nodes
         self.ctls={n['id']:c for n,c in zip(nodes,controllers)}
         self.controllers=controllers
@@ -855,15 +882,21 @@ class SportsMonitor:
         if self.co.tracks:self.co.seek(target,self.drag_resume)
 
     def draw_timeline(self):
-        canvas=self.timeline;w=canvas.winfo_width();canvas.delete('all')
+        canvas=self.timeline;w=canvas.winfo_width()
         x0=52;x1=w-18;start,span=self.timeline_range()
         if x1<=x0:return
         def x(pos):return x0+(pos-start)/span*(x1-x0)
-        for i in range(9):
+        signature=(w,start,span,self.co.origin,self.selected,
+                   tuple((k,id(t.segments),len(t.segments),t.offset,
+                          tuple((s['remote'],s['offset']) for s in t.clock_samples)) for k,t in self.co.tracks.items()),
+                   tuple(e['position'] for e in self.events))
+        redraw=signature!=getattr(self,'timeline_signature',None)
+        if redraw:canvas.delete('all');self.timeline_signature=signature
+        for i in range(9) if redraw else []:
             p=start+span*i/8;xx=x(p)
             canvas.create_text(xx,9,text=tc(p),fill=T.FG_MUTED,font=T.F_TINY)
             canvas.create_line(xx,19,xx,105,fill=T.BORDER)
-        for i,node in enumerate(self.nodes):
+        for i,node in enumerate(self.nodes if redraw else []):
             key=node['id'];y=23+i*21
             canvas.create_text(6,y+7,text=key.upper(),fill=T.INFO_BLUE if key==self.selected else T.FG_TEXT,anchor='w',font=T.F_SMALL)
             canvas.create_rectangle(x0,y,x1,y+14,fill=T.BG_RAISED,outline='')
@@ -872,15 +905,16 @@ class SportsMonitor:
                 for a,b in track.intervals():
                     left,right=max(x0,x(a-self.co.origin)),min(x1,x(b-self.co.origin))
                     if right>left:canvas.create_rectangle(left,y,right,y+14,fill=T.TRACK_SELECTED if key==self.selected else T.TRACK_BLUE,outline='')
-        for event in self.events:
+        for event in self.events if redraw else []:
             xx=x(event['position'])
             if x0<=xx<=x1:canvas.create_polygon(xx-4,20,xx+4,20,xx,26,fill=T.WARN_AMBER)
         pos=self.drag if self.drag is not None else self.co.playhead()
         if self.co.state=='live' and self.drag is None:pos=self.co.duration
         xx=x(pos)
+        canvas.delete('playhead')
         if x0<=xx<=x1:
-            canvas.create_line(xx,16,xx,108,fill=T.INFO_BLUE,width=2)
-            canvas.create_polygon(xx-5,16,xx+5,16,xx,23,fill=T.INFO_BLUE)
+            canvas.create_line(xx,16,xx,108,fill=T.INFO_BLUE,width=2,tags='playhead')
+            canvas.create_polygon(xx-5,16,xx+5,16,xx,23,fill=T.INFO_BLUE,tags='playhead')
         self.position_label.config(text='%s / %s%s'%(tc(pos),tc(self.co.duration),'  · 定位中' if self.co.state=='loading' else ''))
 
     def drain(self):
@@ -927,7 +961,8 @@ class SportsMonitor:
             nodes={k:dict(alive=c.feed.alive(),fps=c.live_fps(),image_n=c.feed.image_n,
                          recording=c.recording,mode=c.mode,paused=c.paused,position=c.position_s(),
                          source=self.co.tracks[k].directory if k in self.co.tracks else None,
-                         status=self.co.messages.get(k,'')) for k,c in self.ctls.items()}))
+                         status=self.co.messages.get(k,''),display_fps=self.surfaces[k].display_fps(),
+                         presented=self.surfaces[k].presented_count) for k,c in self.ctls.items()}))
 
     def loop(self):
         if self.closing:return
@@ -937,10 +972,10 @@ class SportsMonitor:
             if self.co.state=='live':
                 for ctl in self.controllers:ctl.tick()
             for pad in self.pads:pad.pump()
-            if now-self.last_render>.05:
+            for surface in self.surfaces.values():
+                if self.focused is None or surface.key==self.focused:surface.draw()
+            if now-self.last_render>.2:
                 self.last_render=now
-                for surface in self.surfaces.values():
-                    if self.focused is None or surface.key==self.focused:surface.draw()
                 self.draw_timeline()
                 modes={'live':'直播','playing':'联动回放' if self.co.linked else '单路回放','paused':'回放已暂停','loading':'正在共同定位…','buffering':'正在缓冲下一分段…'}
                 self.mode_label.config(text=modes[self.co.state],fg=T.LIVE_GREEN if self.co.state=='live' else T.WARN_AMBER)
@@ -962,15 +997,18 @@ class SportsMonitor:
                     if self.info.winfo_width()<300:
                         text='%s %s'%(key.upper(),'录' if c.recording else '停')
                     else:
-                        text='%s  %s%s\n%s · %.1f fps'%(key.upper(),'录制中' if c.recording else '已停止',arch,
-                            '在线' if c.feed.alive() else '无直播',c.live_fps())
+                        text='%s  %s%s\n显示 %.1f fps · %s'%(key.upper(),'录制中' if c.recording else '已停止',arch,
+                            self.surfaces[key].display_fps(),'回放' if c.mode=='replay' else '直播')
                     self.camera_labels[key].config(text=text,fg=T.INFO_BLUE if key==self.selected else (T.FG_TEXT if c.feed.alive() else T.FG_MUTED))
             if now-self.last_catalog>5 and not self.catalog_busy:self.refresh_catalog()
             if any(c.recording for c in self.controllers) and now-self.last_clock>60 and not self.clock_busy:self.calibrate()
             if now-self.last_health>5:self.last_health=now;self.write_health()
         except Exception:
             LOG.exception('Sports monitor loop failed')
-        self.root.after(15,self.loop)
+        # Include processing time in the poll budget; do not add 15 ms after
+        # decoding/rendering. Poll above source rate to avoid cadence aliasing.
+        elapsed=time.monotonic()-now
+        self.root.after(max(1,int((1/240-elapsed)*1000)),self.loop)
 
     def close(self):
         if self.closing:return

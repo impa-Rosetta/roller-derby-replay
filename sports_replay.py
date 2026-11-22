@@ -325,7 +325,10 @@ class ReplayCoordinator:
 
     def install_capture(self,key,prepared):
         ctl=self.controllers[key]
-        if ctl.cap is not None:ctl.cap.release()
+        if ctl.cap is not None:
+            old=ctl.cap
+            if self.pool is not None:self.pool.submit(old.release)
+            else:old.release()
         ctl.cap=prepared['cap'];ctl.drawn=prepared['drawn'];ctl.idx=prepared['idx']
         ctl.seg=prepared['seg'];ctl.fps=prepared['fps'];ctl.frame_count=prepared['info']['frames']
         ctl.pending=None;ctl._next_tick=0;ctl._eof_t=0;ctl.ended=False;ctl.paused=True
