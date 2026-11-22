@@ -19,6 +19,7 @@ from sports_widgets import RoundedCard,SoftButton,IconBadge,section_heading,tran
 from studio_services_rk import fmt_hms
 from sports_replay import (Track, ReplayCoordinator, camera_catalog, grouped_sessions,
                            measure_clock, save_json)
+from match_clock import MatchClock, mmss
 
 LOG=logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ class SportsMonitor:
         self.results=queue.Queue();self.closing=False
         self.catalogs={};self.groups=[];self.group_labels=[]
         self.match_id=None;self.match_name='未选择赛事';self.active_paths={}
+        self.game_clock=MatchClock();self.hover_x=None;self.hover_y=40
         self.events=[];self.calibrations={};self.clock_busy=False;self.last_clock=0
         self.batch_busy=False;self.batch_action='';self.batch_pending=set();self.batch_results={}
         self.catalog_busy=False;self.last_catalog=0;self.pending_new=False
@@ -176,6 +178,8 @@ class SportsMonitor:
         tk.Label(toolbar,text='共同赛事时间轴',font=T.F_TITLE,bg=T.BG_PANEL,fg=T.FG_TEXT).pack(side='left',padx=(0,18))
         self.position_label=tk.Label(toolbar,text='00:00:00 / 00:00:00',font=T.F_HUD,bg=T.BG_PANEL,fg=T.INFO_BLUE)
         self.position_label.pack(side='left')
+        self.game_clock_label=tk.Label(toolbar,text='比赛未开始',font=T.F_HUD,bg=T.BG_PANEL,fg=T.FG_MUTED)
+        self.game_clock_label.pack(side='left',padx=20)
         self.button(toolbar,'全程',self.fit_timeline).pack(side='right',padx=3)
         self.button(toolbar,'−',lambda:self.change_zoom(1/1.5)).pack(side='right',padx=3)
         self.button(toolbar,'＋',lambda:self.change_zoom(1.5)).pack(side='right',padx=3)
@@ -184,6 +188,8 @@ class SportsMonitor:
         self.timeline.bind('<Button-1>',self.timeline_press)
         self.timeline.bind('<B1-Motion>',self.timeline_motion)
         self.timeline.bind('<ButtonRelease-1>',self.timeline_release)
+        self.timeline.bind('<Motion>',self.timeline_hover)
+        self.timeline.bind('<Leave>',self.timeline_leave)
         self.timeline.bind('<MouseWheel>',lambda e:self.change_zoom(1.5 if e.delta>0 else 1/1.5))
         self.timeline.bind('<Button-4>',lambda e:self.change_zoom(1.5))
         self.timeline.bind('<Button-5>',lambda e:self.change_zoom(1/1.5))
@@ -268,6 +274,11 @@ class SportsMonitor:
         self.stop_button.pack(side='left',fill='x',expand=True)
         self.rec_label=tk.Label(recording,text='录制状态读取中',bg=T.BG_PANEL,fg=T.FG_MUTED,font=T.F_SMALL,anchor='w')
         self.rec_label.pack(fill='x',pady=(5,0))
+        game_row=tk.Frame(recording,bg=T.BG_PANEL);game_row.pack(fill='x',pady=(10,0))
+        self.game_start_button=self.button(game_row,'比赛开始',self.start_game_clock,T.LIVE_GREEN_D)
+        self.game_start_button.pack(side='left',fill='x',expand=True,padx=(0,4))
+        self.game_pause_button=self.button(game_row,'暂停比赛',self.toggle_game_clock)
+        self.game_pause_button.pack(side='left',fill='x',expand=True)
 
         playback=card('多机位回放','play',subtitle='共用一个赛事时刻，定位关键画面')
         self.linked=tk.BooleanVar(value=True)
@@ -465,6 +476,7 @@ class SportsMonitor:
         for ctl in self.controllers:ctl.to_live()
         self.match_id='match_'+uuid.uuid4().hex[:12]
         self.match_name=name;self.events=[]
+        self.game_clock=MatchClock();self.timeline_leave()
         self.co.set_tracks(tracks);self.fit_timeline()
         # Restore prior per-match calibration and events when the same four
         # directories are opened again, independently of the combo ordering.
@@ -472,11 +484,17 @@ class SportsMonitor:
         for p in (self.state_root/'matches').glob('*.json'):
             try:
                 saved=json.loads(p.read_text())
-                if {k:v['directory'] for k,v in saved['tracks'].items()}==signature:
+                saved_paths=dict(saved.get('recording_paths',{}))
+                saved_paths.update({k:v['directory'] for k,v in saved['tracks'].items()})
+                if saved_paths==signature:
                     self.match_id=saved['id'];self.events=saved.get('events',[])
                     self.match_name=saved.get('name',name)
+                    self.game_clock=MatchClock(saved.get('match_clock'))
                     for key,t in tracks.items():
-                        v=saved['tracks'][key]
+                        v=saved['tracks'].get(key,{})
+                        calibration=saved.get('clock_calibrations',{}).get(key)
+                        if not v.get('clock_samples') and calibration:
+                            v=dict(v,calibrated=True,clock_samples=[calibration],uncertainty=calibration['uncertainty'])
                         for field in ['offset','calibrated','uncertainty','clock_samples']:
                             if field in v:setattr(t,field,v[field])
                     self.co.origin=min((t.start for t in tracks.values() if t.segments),default=0);break
@@ -494,8 +512,55 @@ class SportsMonitor:
         if not self.match_id:return
         tracks={k:t.dump() for k,t in self.co.tracks.items()}
         for track in tracks.values():track['segments']=[s for s in track['segments'] if not s.get('ring')]
+        paths={k:t['directory'] for k,t in tracks.items()}
+        if getattr(self,'pending_new',False):paths.update(self.active_paths)
         save_json(self.state_root/'matches'/(self.match_id+'.json'),
-                  dict(id=self.match_id,name=self.match_name,tracks=tracks,events=self.events))
+                  dict(id=self.match_id,name=self.match_name,tracks=tracks,events=self.events,
+                       match_clock=self.game_clock.dump() if getattr(self,'game_clock',None) else None,
+                       recording_paths=paths,
+                       clock_calibrations=getattr(self,'calibrations',{}) if getattr(self,'pending_new',False) else {}))
+
+    def current_match_recording(self):
+        if not self.match_id:return False
+        for key,ctl in self.ctls.items():
+            if not ctl.recording:continue
+            track=self.co.tracks.get(key)
+            active=next((s['dir'] for s in self.catalogs.get(key,[]) if s.get('active')),None)
+            if track and track.directory==active:return True
+            if self.pending_new and key in self.active_paths:return True
+        return False
+
+    def start_game_clock(self):
+        if self.game_clock.started:return
+        if not self.current_match_recording():
+            messagebox.showinfo('比赛计时','请先开启本场录像，再开始比赛。',parent=self.root);return
+        # Use the current DGX wall time, never the replay pointer (which may be
+        # displaying older video). Clock correction already maps tracks here.
+        self.game_clock.start();self.save_match();self.update_events();self.update_game_clock_ui()
+        self.message='比赛开始'
+
+    def toggle_game_clock(self):
+        if not self.game_clock.started:return
+        if self.game_clock.running:self.game_clock.pause();self.message='比赛已暂停'
+        else:
+            if not self.current_match_recording():
+                messagebox.showinfo('比赛计时','请先恢复本场录像。',parent=self.root);return
+            self.game_clock.resume();self.message='比赛继续'
+        self.save_match();self.update_events();self.update_game_clock_ui()
+
+    def update_game_clock_ui(self):
+        clock=self.game_clock
+        text=('比赛 '+mmss(clock.current()) if clock.running else '比赛暂停 '+mmss(clock.current())) if clock.started else '比赛未开始'
+        self.game_clock_label.config(text=text,fg=T.LIVE_GREEN if clock.running else T.WARN_AMBER if clock.started else T.FG_MUTED)
+        self.game_start_button.config(state='normal' if not clock.started and not self.batch_busy and self.current_match_recording() else 'disabled')
+        self.game_pause_button.config(text='暂停比赛' if clock.running else '继续比赛',
+                                     state='normal' if clock.started and (clock.running or self.current_match_recording()) else 'disabled')
+
+    def match_time_label(self,position,explicit=False):
+        clock=getattr(self,'game_clock',None)
+        if not clock or not clock.started:return ('录像 ' if explicit else '')+tc(position)
+        if self.co.duration<=0 or not self.co.tracks:return '等待录像'
+        return clock.label_at(self.co.origin+position)
 
     def combine_dialog(self):
         dialog=tk.Toplevel(self.root);dialog.title('组合四路赛事录像');dialog.configure(bg=T.BG_PANEL)
@@ -538,12 +603,17 @@ class SportsMonitor:
         if action=='start' and all(self.ctls[k].recording for k in keys):
             self.message='所选相机已在录制，无需重复启动。';return
         self.batch_busy=True;self.batch_action=action;self.batch_pending=set(keys);self.batch_results={}
+        if action=='stop':
+            self.stopping_paths={key:(next((s['dir'] for s in self.catalogs.get(key,[]) if s.get('active')),None)
+                                      or self.active_paths.get(key)) for key in keys}
         self.message='正在%s %d 台相机…'%('启动' if action=='start' else '安全停止',len(keys))
         if action=='start' and len(keys)==4:
+            if getattr(self,'game_clock',None) and self.game_clock.running:self.game_clock.pause();self.save_match()
             self.ring_overlays.clear()
             self.pending_new=True;self.active_paths={}
             self.match_id='match_'+datetime.now().strftime('%Y%m%d_%H%M%S')
             self.match_name=datetime.now().strftime('%m-%d %H:%M')+' 新赛事'
+            self.game_clock=MatchClock();self.timeline_leave()
             self.events=[];self.co.live();self.co.set_tracks({});self.match_combo.set(self.match_name)
             self.calibrate()
         for key in keys:
@@ -584,9 +654,28 @@ class SportsMonitor:
         for k,(passed,status,detail) in self.batch_results.items():
             if not passed:self.message+='\n%s：%s'%(k.upper(),detail[:150])
         LOG.info('Batch %s results: %s',self.batch_action,self.batch_results)
-        if self.batch_action=='stop':self.after_stop=True
+        if self.batch_action=='stop':
+            self.after_stop=True
+            if not any(c.recording for c in self.controllers):self.freeze_stopped_match_clocks()
         if self.pending_new and not self.active_paths:self.pending_new=False
         self.refresh_catalog()
+
+    def freeze_stopped_match_clocks(self):
+        stopped={p for p in getattr(self,'stopping_paths',{}).values() if p}
+        if not stopped:return
+        # The operator may be reviewing another match when all recorders stop.
+        # Freeze the actual stopped match's saved clock as well as the visible one.
+        for p in (self.state_root/'matches').glob('*.json'):
+            try:
+                data=json.loads(p.read_text());paths=set(data.get('recording_paths',{}).values())
+                paths.update(t['directory'] for t in data.get('tracks',{}).values())
+                if not paths.intersection(stopped):continue
+                if data.get('id')==self.match_id:
+                    if self.game_clock.pause():self.save_match()
+                elif data.get('match_clock'):
+                    clock=MatchClock(data['match_clock'])
+                    if clock.pause():data['match_clock']=clock.dump();save_json(p,data)
+            except (OSError,ValueError,KeyError):LOG.exception('Could not freeze stopped match clock: %s',p)
 
     def calibrate(self):
         if self.clock_busy:return
@@ -702,6 +791,13 @@ class SportsMonitor:
                 saved=json.loads(p.read_text());before=json.dumps(saved.get('tracks',{}),sort_keys=True)
                 old_origin=origin(saved['tracks'])
                 update_tracks(saved['tracks'])
+                if 'recording_paths' in saved:
+                    for key,directory in list(saved['recording_paths'].items()):
+                        row=deleted.get((key,directory))
+                        if row:
+                            other=alternatives.get((key,row['name']))
+                            if other:saved['recording_paths'][key]=other['directory']
+                            else:del saved['recording_paths'][key]
                 if before!=json.dumps(saved['tracks'],sort_keys=True):
                     if saved['tracks']:
                         delta=old_origin-origin(saved['tracks'])
@@ -805,7 +901,7 @@ class SportsMonitor:
 
     def update_events(self):
         self.event_list.delete(0,'end')
-        for e in self.events:self.event_list.insert('end',tc(e['position'])+'  '+e['note'])
+        for e in self.events:self.event_list.insert('end',self.match_time_label(e['position'])+'  '+e['note'])
         self.update_event_empty()
 
     def update_event_empty(self,event=None):
@@ -830,7 +926,7 @@ class SportsMonitor:
             return 'break'
         target=self.events[selected[0]];match_id=self.match_id
         note=simpledialog.askstring('编辑赛事标记',
-            '标记时间：%s\n修改备注（保留原标记时间）：'%tc(target['position']),
+            '标记时间：%s\n修改备注（保留原标记时间）：'%self.match_time_label(target['position']),
             initialvalue=target['note'],parent=self.root)
         if note is None:return 'break'
         note=note.strip()
@@ -849,7 +945,7 @@ class SportsMonitor:
 
     def export_events(self):
         path=filedialog.asksaveasfilename(parent=self.root,title='导出赛事标记',defaultextension='.json',filetypes=[('JSON','*.json')])
-        if path:save_json(path,dict(match=self.match_name,events=self.events))
+        if path:save_json(path,dict(match=self.match_name,events=self.events,match_clock=self.game_clock.dump()))
 
     def timeline_range(self):
         total=max(1,self.co.duration);span=max(.5,total/self.zoom)
@@ -874,13 +970,41 @@ class SportsMonitor:
 
     def timeline_press(self,e):
         self.drag=self.timeline_time(e.x);self.drag_resume=self.co.state!='paused'
+        self.timeline_hover(e)
 
     def timeline_motion(self,e):
         self.drag=self.timeline_time(e.x)
+        self.timeline_hover(e)
 
     def timeline_release(self,e):
         target=self.timeline_time(e.x);self.drag=None
         if self.co.tracks:self.co.seek(target,self.drag_resume)
+
+    def timeline_hover(self,e):
+        if e.x<52 or e.x>self.timeline.winfo_width()-18:
+            self.timeline_leave();return
+        self.hover_x=e.x;self.hover_y=e.y;self.draw_timeline_hover()
+
+    def timeline_leave(self,e=None):
+        self.hover_x=None;self.timeline.delete('hover')
+
+    def draw_timeline_hover(self):
+        canvas=self.timeline;canvas.delete('hover')
+        x=getattr(self,'hover_x',None)
+        if x is None:return
+        p=self.timeline_time(x);label=self.match_time_label(p,True)
+        clock=getattr(self,'game_clock',None)
+        if clock and clock.started and not label.startswith(('赛前','暂停','等待')):label='比赛 '+label
+        canvas.create_line(x,20,x,108,fill=T.FG_TEXT,dash=(3,3),tags='hover')
+        text=canvas.create_text(x,max(20,min(80,getattr(self,'hover_y',40)-24)),text=label,
+                                font=T.F_SMALL,fill=T.VIDEO_FG,tags='hover')
+        bounds=canvas.bbox(text)
+        if bounds:
+            if bounds[0]<10:canvas.move(text,10-bounds[0],0)
+            elif bounds[2]>canvas.winfo_width()-10:canvas.move(text,canvas.winfo_width()-10-bounds[2],0)
+            a,b,c,d=canvas.bbox(text)
+            box=canvas.create_rectangle(a-7,b-4,c+7,d+4,fill=T.VIDEO_HEADER,outline='',tags='hover')
+            canvas.tag_lower(box,text)
 
     def draw_timeline(self):
         canvas=self.timeline;w=canvas.winfo_width()
@@ -890,12 +1014,13 @@ class SportsMonitor:
         signature=(w,start,span,self.co.origin,self.selected,
                    tuple((k,id(t.segments),len(t.segments),t.offset,
                           tuple((s['remote'],s['offset']) for s in t.clock_samples)) for k,t in self.co.tracks.items()),
-                   tuple(e['position'] for e in self.events))
+                   tuple(e['position'] for e in self.events),
+                   len(self.game_clock.transitions) if getattr(self,'game_clock',None) else 0)
         redraw=signature!=getattr(self,'timeline_signature',None)
         if redraw:canvas.delete('all');self.timeline_signature=signature
         for i in range(9) if redraw else []:
             p=start+span*i/8;xx=x(p)
-            canvas.create_text(xx,9,text=tc(p),fill=T.FG_MUTED,font=T.F_TINY,
+            canvas.create_text(xx,9,text=self.match_time_label(p),fill=T.FG_MUTED,font=T.F_TINY,
                                anchor='e' if i==8 else 'w' if i==0 else 'center')
             canvas.create_line(xx,19,xx,105,fill=T.BORDER)
         for i,node in enumerate(self.nodes if redraw else []):
@@ -910,6 +1035,13 @@ class SportsMonitor:
         for event in self.events if redraw else []:
             xx=x(event['position'])
             if x0<=xx<=x1:canvas.create_polygon(xx-4,20,xx+4,20,xx,26,fill=T.WARN_AMBER)
+        clock=getattr(self,'game_clock',None)
+        if redraw and clock and clock.started:
+            zero=x(clock.transitions[0]['wall']-self.co.origin)
+            if x0<=zero<=x1:canvas.create_line(zero,18,zero,108,fill=T.LIVE_GREEN,width=2)
+            for a,b in clock.paused_intervals(self.co.origin+self.co.duration):
+                left,right=max(x0,x(a-self.co.origin)),min(x1,x(b-self.co.origin))
+                if right>left:canvas.create_rectangle(left,20,right,108,fill=T.FG_MUTED,stipple='gray50',outline='')
         pos=self.drag if self.drag is not None else self.co.playhead()
         if self.co.state=='live' and self.drag is None:pos=self.co.duration
         xx=x(pos)
@@ -917,7 +1049,8 @@ class SportsMonitor:
         if x0<=xx<=x1:
             canvas.create_line(xx,16,xx,108,fill=T.INFO_BLUE,width=2,tags='playhead')
             canvas.create_polygon(xx-5,16,xx+5,16,xx,23,fill=T.INFO_BLUE,tags='playhead')
-        self.position_label.config(text='%s / %s%s'%(tc(pos),tc(self.co.duration),'  · 定位中' if self.co.state=='loading' else ''))
+        self.position_label.config(text='%s / %s%s'%(self.match_time_label(pos),self.match_time_label(self.co.duration),'  · 定位中' if self.co.state=='loading' else ''))
+        self.draw_timeline_hover()
 
     def drain(self):
         while True:
@@ -960,6 +1093,7 @@ class SportsMonitor:
             platform='sports',view=self.focused or 'grid',state=self.co.state,
             linked=self.co.linked,position=self.co.playhead(),duration=self.co.duration,
             match=self.match_id,batch_busy=self.batch_busy,
+            match_clock=self.game_clock.dump(),match_elapsed=self.game_clock.current(),
             nodes={k:dict(alive=c.feed.alive(),fps=c.live_fps(),image_n=c.feed.image_n,
                          recording=c.recording,mode=c.mode,paused=c.paused,position=c.position_s(),
                          source=self.co.tracks[k].directory if k in self.co.tracks else None,
@@ -979,6 +1113,7 @@ class SportsMonitor:
             if now-self.last_render>.2:
                 self.last_render=now
                 self.draw_timeline()
+                self.update_game_clock_ui()
                 modes={'live':'直播','playing':'联动回放' if self.co.linked else '单路回放','paused':'回放已暂停','loading':'正在共同定位…','buffering':'正在缓冲下一分段…'}
                 self.mode_label.config(text=modes[self.co.state],fg=T.LIVE_GREEN if self.co.state=='live' else T.WARN_AMBER)
                 symbol,label=transport_state(self.co.state,self.co.resume_after_load)

@@ -1,0 +1,18 @@
+{
+  "test": "Isolated match metadata with recorded footage and an injected demonstration wall clock; no real match was started by the test.",
+  "tests": 103,
+  "verified": {
+    "frozen": 4.033417358063161,
+    "hover": "暂停 00:04",
+    "replay": "00:01",
+    "transitions": 3,
+    "independent_clock": true,
+    "compact": true,
+    "recording": [
+      false,
+      false,
+      false,
+      false
+    ]
+  }
+}
