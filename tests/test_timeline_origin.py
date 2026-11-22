@@ -75,5 +75,18 @@ class TimelineOriginTests(unittest.TestCase):
         self.assertFalse(app.pending_new);self.assertEqual(len(app.co.tracks),2)
         self.assertAlmostEqual(app.co.duration,10)
 
+    def test_initial_catalog_prefers_active_match_over_longer_history(self):
+        from sports_monitor import SportsMonitor
+        app=object.__new__(SportsMonitor);app.catalogs={};app.batch_busy=False
+        app.ctls={k:SimpleNamespace(remote_busy=False,recording=False,feed=Mock()) for k in ['rk1','rk2']}
+        app.controllers=list(app.ctls.values())
+        app.pending_new=False;app.co=SimpleNamespace(tracks={});app.match_combo=MagicMock();app.use_group=Mock()
+        catalog={k:[dict(name='old',dir='/'+k+'/old',segments=[segment(end=100)],active=False),
+                    dict(name='current',dir='/'+k+'/current',segments=[segment(wall=WALL+86400)],active=True)]
+                 for k in app.ctls}
+        app.apply_catalog(catalog)
+        tracks=app.use_group.call_args[0][0]
+        self.assertTrue(all(t.name=='current' for t in tracks.values()))
+
 
 if __name__=='__main__':unittest.main()

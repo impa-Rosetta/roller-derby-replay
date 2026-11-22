@@ -33,8 +33,6 @@ class StorageManager:
         tk.Label(header,text='录像与存储管理',font=T.F_BRAND,bg=T.BG_APP,fg=T.FG_TEXT).pack(side='left')
         self.refresh_button = SoftButton(header,'刷新空间与录像',self.refresh)
         self.refresh_button.pack(side='right')
-        tk.Label(self.window,text='每场比赛包含四个机位；展开查看详情，回放、归档和删除均以比赛为单位。',
-                 bg=T.BG_APP,fg=T.FG_MUTED,font=T.F_BODY).pack(anchor='w',padx=20)
         disk_row = tk.Frame(self.window,bg=T.BG_APP);disk_row.pack(fill='x',padx=14,pady=12)
         self.disk_labels = {}
         for i,key in enumerate(['dgx']+list(app.ctls)):
@@ -54,12 +52,12 @@ class StorageManager:
         self.search_trace = self.search.trace_add('write',lambda *a:self.render_rows())
         table = tk.Frame(self.window,bg=T.BG_PANEL);table.pack(fill='both',expand=True,padx=18)
         style = ttk.Style(self.window)
-        style.configure('Storage.Treeview',rowheight=34,font=T.F_SMALL,background=T.BG_PANEL,
+        style.configure('Storage.Treeview',rowheight=42,font=T.F_SMALL,background=T.BG_PANEL,
                         fieldbackground=T.BG_PANEL,foreground=T.FG_TEXT,borderwidth=0)
         style.configure('Storage.Treeview.Heading',font=T.F_SMALL,background=T.INFO_SOFT,foreground=T.FG_TEXT)
         style.map('Storage.Treeview',background=[('selected',T.INFO_BLUE)],foreground=[('selected','#ffffff')])
-        columns = [('time','录制时间',155),('duration','比赛时长',95),('rk','RK 原件占用',115),
-                   ('dgx','DGX 归档占用',115),('status','完整性 / 归档状态',240)]
+        columns = [('time','录制时间',190),('duration','比赛时长',110),('rk','RK 原件占用',130),
+                   ('dgx','DGX 归档占用',130),('status','完整性 / 归档状态',270)]
         self.tree = ttk.Treeview(table,columns=[c[0] for c in columns],show='tree headings',
                                  selectmode='extended',style='Storage.Treeview')
         self.tree.heading('#0',text='比赛 / 四机位详情');self.tree.column('#0',width=390,minwidth=230)
@@ -96,7 +94,7 @@ class StorageManager:
 
     def selection_status(self):
         rows = self.selected()
-        self.selection_label.config(text='已选择 %d 场比赛 · %d 个机位 · %.2f GB  |  Ctrl 多选比赛；双击整场回放'%
+        self.selection_label.config(text='已选择 %d 场比赛 · %d 个机位 · %.2f GB'%
                                     (len(self.selected_matches()),len({(r['node'],r['name']) for r in rows}),
                                      sum(r['bytes'] for r in rows)/1e9))
 
@@ -152,7 +150,7 @@ class StorageManager:
             else:label.config(text=key.upper()+'\n设备离线\n空间暂不可读')
         self.render_rows()
         errors = snapshot['errors']
-        self.status.config(text=('共 %d 场比赛；点击比赛即可操作其全部机位，展开可查看存放位置。'%len(snapshot.get('matches',[])))+
+        self.status.config(text=('共 %d 场比赛'%len(snapshot.get('matches',[])))+
                            ('\n部分读取失败：'+'；'.join(k+': '+v for k,v in errors.items()) if errors else ''))
 
     def select_match(self):

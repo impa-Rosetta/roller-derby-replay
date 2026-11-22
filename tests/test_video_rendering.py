@@ -39,7 +39,7 @@ class VideoRenderingTests(unittest.TestCase):
         co=SimpleNamespace(messages={},state='playing',linked=True,tracks={'rk1':object()},
                            participants=['rk1'],playhead=lambda:1.)
         app=SimpleNamespace(ctls={'rk1':self.ctl},co=co,selected='rk1',select=lambda k:None,focus_camera=lambda k:None)
-        self.surface=CameraSurface(self.root,app,'rk1');self.surface.canvas.pack(fill='both',expand=True)
+        self.surface=CameraSurface(self.root,app,'rk1');self.surface.frame.pack(fill='both',expand=True)
         self.root.update()
 
     def tearDown(self):
@@ -67,6 +67,15 @@ class VideoRenderingTests(unittest.TestCase):
         self.assertLessEqual(w,s.canvas.winfo_width());self.assertLessEqual(h,s.canvas.winfo_height())
         with patch('sports_monitor.time.monotonic',return_value=s.presented[-1]+3):
             self.assertEqual(s.display_fps(),0)
+
+    def test_status_header_is_outside_video_and_updates_while_frame_is_paused(self):
+        s=self.surface;s.draw();self.root.update()
+        self.assertEqual(s.canvas.find_withtag('hud'),())
+        self.assertGreaterEqual(s.canvas.winfo_y(),s.header.winfo_height())
+        self.assertTrue(s.state_label.winfo_ismapped())
+        self.ctl.recording=True;s.draw();self.root.update()
+        self.assertIn('录制中',s.name_label.cget('text'))
+        self.assertIn('信号中断',s.state_label.cget('text'))
 
     def test_timeline_motion_reuses_static_tracks(self):
         app=object.__new__(SportsMonitor);app.timeline=tk.Canvas(self.root,width=600,height=112)

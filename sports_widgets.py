@@ -39,7 +39,7 @@ class RoundedCard(tk.Canvas):
 
 
 class SoftButton(tk.Canvas):
-    def __init__(self,parent,text,command,color=None,font=T.F_BODY,height=36,symbol=None):
+    def __init__(self,parent,text,command,color=None,font=T.F_BODY,height=44,symbol=None):
         self.text=text;self.command=command;self.color=color or T.BG_RAISED
         self.symbol=symbol
         self.enabled=True;self.hover=False;self.pressed=False

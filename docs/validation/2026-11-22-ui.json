@@ -1,0 +1,31 @@
+{
+  "status_location": "Separate header outside video canvas",
+  "main_font_pt": 14,
+  "status_font_pt": 12,
+  "button_height_px": 44,
+  "checked_windows": [
+    "2560x1440",
+    "1200x800"
+  ],
+  "recording_continued": true,
+  "results": [
+    {
+      "view": "grid",
+      "fps": {
+        "rk1": 59.05,
+        "rk2": 59.05,
+        "rk3": 59.11,
+        "rk4": 59.11
+      }
+    },
+    {
+      "view": "rk4",
+      "fps": {
+        "rk1": 0.0,
+        "rk2": 0.0,
+        "rk3": 0.0,
+        "rk4": 58.7
+      }
+    }
+  ]
+}
