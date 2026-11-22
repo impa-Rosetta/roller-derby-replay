@@ -432,7 +432,7 @@ class SportsMonitor:
             tracks={}
             for key,directory in self.active_paths.items():
                 s=next((s for s in self.catalogs.get(key,[]) if s['dir']==directory),None)
-                if s:
+                if s and s['segments']:
                     t=Track.from_session(key,s)
                     if key in self.calibrations:
                         t.calibrated=True;t.clock_samples=[self.calibrations[key]]
@@ -478,7 +478,7 @@ class SportsMonitor:
                         v=saved['tracks'][key]
                         for field in ['offset','calibrated','uncertainty','clock_samples']:
                             if field in v:setattr(t,field,v[field])
-                    self.co.origin=min(t.start for t in tracks.values());break
+                    self.co.origin=min((t.start for t in tracks.values() if t.segments),default=0);break
             except (OSError,ValueError,KeyError):continue
         self.save_match();self.update_events()
 

@@ -216,6 +216,7 @@ class ReplayCoordinator:
         self.now = now
         self.tracks = {}
         self.origin = 0
+        self._origin_ready = False
         self.state = 'live'
         self.position = 0
         self.anchor = now()
@@ -354,6 +355,7 @@ class ReplayCoordinator:
         self.generation += 1
         self.tracks = tracks
         self.origin = min((t.start for t in tracks.values() if t.segments), default=0)
+        self._origin_ready = any(t.segments for t in tracks.values())
         self.position = 0
         self.targets.clear()
         self.messages.clear()
@@ -362,9 +364,23 @@ class ReplayCoordinator:
 
     @property
     def duration(self):
-        return max((t.end-self.origin for t in self.tracks.values() if t.segments),default=0)
+        self.ensure_origin()
+        return max(0,max((t.end-self.origin for t in self.tracks.values() if t.segments),default=0))
+
+    def ensure_origin(self):
+        """The directory can precede its first sealed segment by ten seconds.
+
+        Origin zero is pending, not Unix epoch. Initialize once valid segments
+        arrive, including catalog refreshes that mutate existing Track objects.
+        """
+        if self._origin_ready:return
+        starts=[t.start for t in self.tracks.values() if t.segments]
+        if not starts:return
+        self.origin=min(starts);self._origin_ready=True
+        self.position=0;self.anchor=self.now()
 
     def rebase(self):
+        self.ensure_origin()
         position=self.playhead()
         origin=min((t.start for t in self.tracks.values() if t.segments),default=self.origin)
         delta=self.origin-origin
@@ -376,6 +392,7 @@ class ReplayCoordinator:
         return list(self.tracks) if self.linked else ([self.selected] if self.selected in self.tracks else [])
 
     def playhead(self):
+        self.ensure_origin()
         if self.state == 'playing':
             return min(self.duration, self.position + (self.now()-self.anchor)*self.speed)
         return self.position
