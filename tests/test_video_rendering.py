@@ -74,8 +74,19 @@ class VideoRenderingTests(unittest.TestCase):
         self.assertGreaterEqual(s.canvas.winfo_y(),s.header.winfo_height())
         self.assertTrue(s.state_label.winfo_ismapped())
         self.ctl.recording=True;s.draw();self.root.update()
-        self.assertIn('录制中',s.name_label.cget('text'))
+        self.assertIn('录制中',s.state_label.cget('text'))
         self.assertIn('信号中断',s.state_label.cget('text'))
+
+    def test_dark_header_text_does_not_overlap_at_narrow_widths(self):
+        import sports_theme as T
+        s=self.surface
+        for width in [240,320,640]:
+            self.root.geometry('%dx480'%width);self.root.update();s.draw();self.root.update()
+            self.assertEqual(s.header.cget('bg'),T.VIDEO_HEADER)
+            self.assertLessEqual(s.name_label.winfo_x()+s.name_label.winfo_width(),s.fps_label.winfo_x())
+            self.assertGreaterEqual(s.state_label.winfo_y(),s.name_label.winfo_y()+s.name_label.winfo_height())
+            self.assertLessEqual(s.state_label.winfo_y()+s.state_label.winfo_height(),s.header.winfo_height())
+            self.assertGreaterEqual(s.canvas.winfo_y(),s.header.winfo_height())
 
     def test_timeline_motion_reuses_static_tracks(self):
         app=object.__new__(SportsMonitor);app.timeline=tk.Canvas(self.root,width=600,height=112)

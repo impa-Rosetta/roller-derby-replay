@@ -32,14 +32,16 @@ class CameraSurface:
     def __init__(self, parent, app, key):
         self.app,self.key=app,key
         self.frame=tk.Frame(parent,bg=T.BORDER,highlightthickness=2,highlightbackground=T.BORDER)
-        self.header=tk.Frame(self.frame,bg=T.BG_PANEL,height=58)
-        self.header.pack(fill='x');self.header.pack_propagate(False)
-        self.name_label=tk.Label(self.header,text=key.upper(),bg=T.BG_PANEL,fg=T.FG_TEXT,font=T.F_TITLE)
-        self.name_label.place(x=12,y=4)
-        self.state_label=tk.Label(self.header,bg=T.BG_PANEL,fg=T.FG_MUTED,font=T.F_SMALL,anchor='w')
-        self.state_label.place(x=12,y=32)
-        self.fps_label=tk.Label(self.header,bg=T.BG_PANEL,fg=T.INFO_BLUE,font=T.F_SMALL,anchor='e')
-        self.fps_label.place(relx=1,x=-12,y=5,anchor='ne')
+        self.header=tk.Frame(self.frame,bg=T.VIDEO_HEADER)
+        self.header.pack(fill='x');self.header.columnconfigure(0,weight=1)
+        self.name_label=tk.Label(self.header,text=key.upper(),bg=T.VIDEO_HEADER,fg=T.VIDEO_FG,font=T.F_TITLE,anchor='w')
+        self.name_label.grid(row=0,column=0,sticky='ew',padx=(12,4),pady=(3,0))
+        self.fps_label=tk.Label(self.header,bg=T.VIDEO_HEADER,fg=T.VIDEO_FG,font=T.F_SMALL,anchor='e')
+        self.fps_label.grid(row=0,column=1,sticky='e',padx=(4,12),pady=(3,0))
+        self.state_label=tk.Label(self.header,bg=T.VIDEO_HEADER,fg=T.VIDEO_MUTED,font=T.F_SMALL,
+                                   anchor='w',justify='left',width=1,wraplength=240)
+        self.state_label.grid(row=1,column=0,columnspan=2,sticky='ew',padx=12,pady=(0,5))
+        self.header.bind('<Configure>',lambda e:self.state_label.config(wraplength=max(80,e.width-24)))
         self.canvas=tk.Canvas(self.frame,bg=T.VIDEO_BG,highlightthickness=0,
                               highlightbackground=T.BORDER,cursor='hand2')
         self.canvas.pack(fill='both',expand=True)
@@ -63,10 +65,8 @@ class CameraSurface:
         if status==self.status_signature and now-self.status_time<.5:return
         self.status_time=now;self.status_signature=status
         self.frame.config(highlightbackground=T.INFO_BLUE if self.app.selected==self.key else T.BORDER)
-        self.name_label.config(text=self.key.upper()+'  '+recording,
-                               fg=T.REC_RED if c.recording else T.FG_TEXT)
-        self.state_label.config(text=co.messages.get(self.key,'') or signal+' · '+mode,
-                                fg=T.REC_RED if c.recording and not alive else T.FG_MUTED)
+        self.state_label.config(text=recording+' · '+signal+' · '+(co.messages.get(self.key,'') or mode),
+                                fg='#ff8b9a' if c.recording else T.VIDEO_MUTED)
         self.fps_label.config(text='%.1f fps'%self.display_fps() if co.state not in ('paused','loading') else
                              ('暂停' if co.state=='paused' else '加载中'))
 
