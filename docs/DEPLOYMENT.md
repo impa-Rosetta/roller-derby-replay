@@ -46,7 +46,7 @@ DGX 已有 enP7s7 的持久静态地址、自连接和 SSH socket 开机启用�
 
 2026-11-23 已逐台重启 RK1～RK4，核对 boot_id 变化；SSH 恢复后继续等待并检查，四台均自动恢复有线静态地址、performance governor 和 5000Mbps USB3 相机。修正后验收约 31～38 秒/台完成，DGX 未重启。随后四路同时录制并传输一分钟：平均 59.15～59.20 FPS、DGX 每路收到约 29.2～29.3 Mbps；第一轮 RK2/RK3/RK4 启动前两秒各有 1 帧缺口，后续未增加，不能称该轮零丢帧。第二轮使用监看台 RemoteCtrl 的原始启动/安全停止命令，四路同时运行不少于一分钟，RK1 59.19、RK2 59.21、RK3 59.20、RK4 59.21 FPS，四路采集帧数均等于编码帧数，缺口和超时均为 0，监看台四路均自动接收码流。编码程序、分辨率和码率未改。上述短测不构成长期或每次冷启动绝对零丢帧的保证。
 
-现场验收记录保存在 DGX 状态目录中的 `reboot-validation-20261123.json`、`four-camera-after-reboot-20261123.json`、`gui-launcher-after-reboot-20261123.json`，节点诊断录像在各自 `~/hk_diagnostics/`，不混入比赛目录。开机恢复验收是正常软件重启，尚未做物理断电再上电测试。
+现场验收记录保存在 DGX 状态目录中的 `reboot-validation-20261123.json`、`four-camera-after-reboot-20261123.json`、`gui-launcher-after-reboot-20261123.json`，节点诊断录像在各自 `~/hk_diagnostics/`，不混入比赛目录。上述记录为软件重启，物理断电再上电验收见下文。
 node相机为独占设备：部署时先正常停止该节点录制，保留旧脚本备份；不停止其他节点。
 正常新录制通过--reset-camera复位相机并等待同序列号USB3重新枚举，预计10～15秒；程序存活但没有编码输出不得算STARTED。
 
@@ -72,3 +72,15 @@ USB -19仅说明设备/总线在提交请求时不可用，不能单独判定是
 只读检查：`nmcli -f connection.id,connection.autoconnect,ipv4.method,ipv4.addresses connection show eth2`。若地址已正确、仅未自启，打开autoconnect并在本机激活；通过同一网口SSH执行connection up可能断连，应准备本机终端或延迟执行。
 DGX访问失败可检查目标ARP条目，必要时只清理目标地址再重试，避免随意刷新正在使用的全部节点。FAILED/INCOMPLETE表示解析失败，本身不足以断言是缓存或物理故障。
 完整的现场网络文档在DGX工作日志中，包含本机敏感配置，不直接复制到共享仓库。
+
+## 2026-11-23 物理断电再上电验收
+用户对四台 RK 实际拔插电源后，四台 boot_id 均较上轮软件重启记录改变；本轮未重新设置 governor 或手动激活网口。四台自动恢复 eth2 固定地址、自连接和 performance 配置，cpufrequtils 默认值也保持 performance，四台相机均为 5000Mbps。DGX 本次未断电。
+通过正常手动入口打开监看台，使用其原始 RemoteCtrl 启动/安全停止命令，四路并行录制约 63 秒；监看台自动收到全部四路视频。结果：
+- RK1: 59.16 FPS，采集/编码 3746/3746 帧，帧号缺口 0，超时 0。
+- RK2: 59.16 FPS，采集/编码 3746/3746 帧，帧号缺口 1，超时 0。
+- RK3: 59.11 FPS，采集/编码 3740/3740 帧，帧号缺口 3，超时 0。
+- RK4: 59.18 FPS，采集/编码 3747/3747 帧，帧号缺口 0，超时 0。
+
+RK2 的 1 帧缺口、RK3 的 3 帧缺口均已出现在首个 2 秒统计点，此后约一分钟没有继续增加；本轮证明断电后的网络、性能配置、相机和满帧吞吐恢复正常，但不能称本轮全程零丢帧。无需修改已验证编码管线来掩盖缺口。测试结束已安全停止四路录制。
+
+证据：DGX 状态目录 power-cycle-readiness-20261123.json、gui-launcher-after-power-cycle-20261123.json；节点诊断目录 ~/hk_diagnostics/power-cycle-launcher-20261123-183148/。
