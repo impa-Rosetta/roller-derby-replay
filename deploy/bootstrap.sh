@@ -12,11 +12,15 @@ if [[ "$role" == node ]]; then
  [[ -f /opt/MVS/lib/aarch64/libMvCameraControl.so ]] || { echo 'Install licensed MVS 5.0.1 aarch64 SDK first'; exit 1; }
  export MVCAM_COMMON_RUNENV=/opt/MVS/lib MVCAM_SDK_PATH=/opt/MVS
  export LD_LIBRARY_PATH=/opt/MVS/lib/aarch64:${LD_LIBRARY_PATH:-}
- # Runtime tuning only; record the previous values before applying.
+ # Record the old state, then persist the validated governors across reboot.
  mkdir -p "$HOME/hk_camera" "$HOME/hk_record"
  stamp=$(date +%Y%m%d_%H%M%S)
- { cat /sys/module/usbcore/parameters/usbfs_memory_mb; for f in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do echo "$f=$(cat "$f")"; done; } > "$HOME/hk_camera/runtime-before-$stamp.txt"
- echo 1000 | sudo -n tee /sys/module/usbcore/parameters/usbfs_memory_mb >/dev/null
- for f in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do echo performance | sudo -n tee "$f" >/dev/null; done
+ { cat /sys/module/usbcore/parameters/usbfs_memory_mb; for f in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor /sys/class/devfreq/dmc/governor /sys/class/devfreq/*rkvenc-core/governor; do [[ -f "$f" ]] && echo "$f=$(cat "$f")"; done; } > "$HOME/hk_camera/runtime-before-$stamp.txt"
+ here=$(cd "$(dirname "$0")" && pwd)
+ sudo -n install -o root -g root -m 0755 "$here/roller-replay-performance.sh" /usr/local/sbin/roller-replay-performance
+ sudo -n install -o root -g root -m 0644 "$here/roller-replay-performance.service" /etc/systemd/system/roller-replay-performance.service
+ sudo -n systemctl daemon-reload
+ sudo -n systemctl enable roller-replay-performance.service
+ sudo -n systemctl restart roller-replay-performance.service
 fi
 /usr/bin/python3 "$(dirname "$0")/check_env.py" --role "$role"

@@ -1,0 +1,14 @@
+[Unit]
+Description=RK3588 replay capture performance governors
+After=local-fs.target systemd-modules-load.service
+Before=ssh.service
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/roller-replay-performance
+RemainAfterExit=yes
+TimeoutStartSec=15
+
+[Install]
+WantedBy=multi-user.target

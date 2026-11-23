@@ -8,6 +8,19 @@ for name in (['av','cv2','numpy'] if a.role=='node' else ['av','cv2','numpy','tk
     except ImportError as e:errors.append(str(e))
 if a.role=='node':
     if platform.machine()!='aarch64':errors.append('RK node must be aarch64')
+    governors=list(Path('/sys/devices/system/cpu/cpufreq').glob('policy*/scaling_governor'))
+    governors += list(Path('/sys/class/devfreq').glob('dmc/governor'))
+    governors += list(Path('/sys/class/devfreq').glob('*rkvenc-core/governor'))
+    info['performance_governors']={}
+    for path in governors:
+        try:
+            value=path.read_text().strip();info['performance_governors'][str(path)]=value
+            if value!='performance':errors.append('Performance governor required: '+str(path)+'='+value)
+        except OSError as e:errors.append('Cannot read governor: '+str(e))
+    if not governors:errors.append('RK performance governors unavailable')
+    proc=subprocess.run(['systemctl','is-enabled','--quiet','roller-replay-performance.service'],capture_output=True)
+    info['persistent_performance']=proc.returncode==0
+    if proc.returncode:errors.append('roller-replay-performance.service must be enabled to survive reboot')
     os.environ.setdefault('MVCAM_COMMON_RUNENV','/opt/MVS/lib')
     import sys;sys.path.insert(0,'/opt/MVS/Samples/aarch64/Python/MvImport')
     try:import MvCameraControl_class;info['mvs']='loaded'

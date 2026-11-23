@@ -24,7 +24,11 @@ DGX还需Tk、PyGObject、GStreamer Gst/GstApp、h265parse、nvh265dec及相应�
 通用依赖安装：`bash deploy/bootstrap.sh node --install-packages` 或DGX角色；MVS/FFmpeg必须提前满足上一节。
 
 ## 4. 性能与重启
-bootstrap的node角色记录原运行时值到~/hk_camera/runtime-before-<时间>.txt，然后把CPU governor设performance、usbfs_memory_mb设1000。此操作不改启动镜像，重启后需重新执行。不要覆盖DDR/NPU/USB控制器寄存器或盲目添加quirk。
+bootstrap 的 node 角色先记录原值到 ~/hk_camera/runtime-before-<时间>.txt，然后安装 root 所有的 /usr/local/sbin/roller-replay-performance 与 roller-replay-performance.service，启用开机自动恢复。服务通过 BSP 提供的 sysfs 接口将 CPU、DMC 内存控制器和两路 rkvenc 的 governor 设为 performance；不改频率上限、电压、热保护及硬件寄存器。usbfs_memory_mb 至少 1000 MB，保留已有更大值或 0（无限制）。check_env.py 同时核验 governor 与开机服务，不能只靠部署当天临时调频验收。
+
+2026-11-23 RK3 曾因重启恢复 CPU interactive / DMC dmc_ondemand 而降到 36.7 FPS：每帧平均 27.19 ms，15 秒内相机帧号缺口 330；相机 USB3、分辨率和编码程序均正常。仅恢复上述性能配置，30 秒对照恢复 59.2 FPS，采集/编码 1776 帧，缺口、超时均为 0。服务安装后的 60.02 秒验收采集/编码均 3553 帧（59.20 FPS），相机缺口、编码输入丢帧、超时均为 0，输出 2448×2048、约 29.60 Mbps；未重启设备做开机实测。帧号缺口不应直接归因于 USB 传输故障，主循环来不及处理同样会让 SDK 丢弃旧帧。
+
+维护检查：`systemctl status roller-replay-performance.service`，`journalctl -u roller-replay-performance.service -b`。手动恢复可运行 `sudo systemctl restart roller-replay-performance.service`。此配置会增加空闲功耗；不会绕过温控，也不替代长时录像验收。
 node相机为独占设备：部署时先正常停止该节点录制，保留旧脚本备份；不停止其他节点。
 正常新录制通过--reset-camera复位相机并等待同序列号USB3重新枚举，预计10～15秒；程序存活但没有编码输出不得算STARTED。
 
