@@ -68,6 +68,13 @@ class VideoRenderingTests(unittest.TestCase):
         with patch('sports_monitor.time.monotonic',return_value=s.presented[-1]+3):
             self.assertEqual(s.display_fps(),0)
 
+    def test_frame_step_keeps_current_picture_until_new_frame_arrives(self):
+        s=self.surface;s.draw();item=s.image_item
+        s.app.co.state='loading';s.app.co.reuse_capture=True;s.draw()
+        self.assertEqual(s.canvas.itemcget(item,'state'),'normal');self.assertIs(s.last,self.frame)
+        s.app.co.reuse_capture=False;s.draw()
+        self.assertEqual(s.canvas.itemcget(item,'state'),'hidden')
+
     def test_status_header_is_outside_video_and_updates_while_frame_is_paused(self):
         s=self.surface;s.draw();self.root.update()
         self.assertEqual(s.canvas.find_withtag('hud'),())

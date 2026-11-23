@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import time
 import threading
+import numpy as np
 from unittest.mock import patch,Mock
 from pathlib import Path
 from sports_replay import Track,ReplayCoordinator,grouped_sessions,save_json
@@ -65,7 +66,7 @@ class Loader:
 
 class Capture:
     def __init__(self):self.released=False
-    def read(self):return True,object()
+    def read(self):return True,np.zeros((2,2,3),dtype=np.uint8)
     def set(self,prop,value):return True
     def release(self):self.released=True
 
@@ -186,7 +187,7 @@ class CoordinatorTests(unittest.TestCase):
         with patch('cv2.VideoCapture',return_value=software) as factory:
             result=self.co.prepare_capture('a',segment(),dict(mkv='/test/same.mkv',fps=10,frames=100),3)
         factory.assert_called_once_with('/test/same.mkv')
-        self.assertIs(result['cap'],software);self.assertEqual(result['idx'],31)
+        self.assertIs(result['cap'].source,software);self.assertEqual(result['idx'],31)
         cap.release.assert_called_once()
 
     def test_reaching_match_end_marks_all_cameras_paused(self):
@@ -195,6 +196,42 @@ class CoordinatorTests(unittest.TestCase):
         self.time=2;self.co.tick()
         self.assertEqual(self.co.state,'paused')
         self.assertTrue(all(c.paused for c in self.ctls.values()))
+
+    def test_step_uses_actual_reference_frame_rate_and_round_trips(self):
+        self.ready();self.co.seek(1.024,False);self.co.tick()
+        self.co.step(1);self.co.tick()
+        self.assertAlmostEqual(self.co.position,1.1);self.assertEqual(self.ctls['a'].idx,12)
+        self.co.step(-1);self.co.tick()
+        self.assertAlmostEqual(self.co.position,1.0);self.assertEqual(self.ctls['a'].idx,11)
+
+    def test_rapid_steps_accumulate_latest_target_before_loading_finishes(self):
+        self.ready();self.co.seek(1,False);self.co.tick()
+        self.co.step(1);self.co.step(1);self.co.step(1);self.co.tick()
+        self.assertAlmostEqual(self.co.position,1.3);self.assertEqual(self.ctls['a'].idx,14)
+
+    def test_steps_cross_segment_boundaries_both_ways_and_clamp_at_match_edges(self):
+        for track in self.co.tracks.values():track.segments.append(segment('b.h265',10,20,1010))
+        self.ready()
+        for c in self.ctls.values():c.loader.clips['b.h265']=dict(mkv='b',fps=10,frames=100)
+        self.co.seek(9.9,False);self.co.tick();self.co.step(1);self.co.tick()
+        self.assertAlmostEqual(self.co.position,10);self.assertEqual(self.ctls['a'].idx,1)
+        self.co.step(-1);self.co.tick();self.assertAlmostEqual(self.co.position,9.9)
+        self.co.seek(0,False);self.co.tick();self.co.step(-1);self.co.tick()
+        self.assertEqual(self.co.position,0)
+
+    def test_installing_borrowed_capture_does_not_release_it(self):
+        self.ready();self.co.seek(1,False);self.co.tick();c=self.ctls['a'];cap=c.cap
+        self.co.install_capture('a',dict(cap=cap,drawn=c.drawn,idx=12,fps=10,seg=c.seg,info=dict(frames=100)))
+        self.assertFalse(cap.released)
+
+    def test_missing_selected_angle_does_not_block_other_angles_or_show_stale_picture(self):
+        self.ready();self.co.seek(1,False);self.co.tick()
+        self.co.tracks['a'].segments=[segment(end=5)]
+        self.co.seek(7,False,reuse=True);self.co.tick()
+        self.assertIsNone(self.ctls['a'].drawn)
+        self.co.step(1);self.co.tick()
+        self.assertAlmostEqual(self.co.position,7.1);self.assertEqual(self.ctls['b'].idx,72)
+        self.assertIsNone(self.ctls['a'].drawn)
 
 
 class BackgroundCaptureTests(unittest.TestCase):
@@ -239,6 +276,35 @@ class BackgroundCaptureTests(unittest.TestCase):
         active=[c.cap for c in self.ctls.values()]
         self.assertTrue(all(c.released for c in created if c not in active))
         self.assertEqual(co.position,6)
+
+    def test_paused_stepping_reuses_decoder_and_does_not_prepare_neighbors(self):
+        from replay_capture_rk import CachedReplayCapture
+        co=self.setup_coordinator();opened=[]
+        def factory(info):
+            cap=CachedReplayCapture(Capture(),info);opened.append(cap);return cap
+        for c in self.ctls.values():c._open_capture=factory
+        co.seek(2,False);self.wait(co,'paused');active=[c.cap for c in self.ctls.values()]
+        co.tick();self.assertFalse(co.neighbors)
+        for delta in [1,1,-1,-1]:
+            co.step(delta);self.wait(co,'paused')
+        self.assertEqual(len(opened),2);self.assertEqual([c.cap for c in self.ctls.values()],active)
+        self.assertTrue(all(not c.closed for c in active));self.assertAlmostEqual(co.position,2)
+        # Superseded reads borrow the active decoder; cleanup must not close it.
+        for _ in range(5):co.step(1);co.tick()
+        self.wait(co,'paused');self.assertTrue(all(not c.closed for c in active))
+
+    def test_repeated_boundary_steps_reuse_previous_segment_pictures(self):
+        from replay_capture_rk import CachedReplayCapture
+        co=self.setup_coordinator();opened=[]
+        def factory(info):
+            cap=CachedReplayCapture(Capture(),info,factory=lambda:Capture());opened.append(cap);return cap
+        for c in self.ctls.values():c._open_capture=factory
+        co.seek(9.9,False);self.wait(co,'paused')
+        for delta in [1,-1,1,-1,1,-1]:
+            co.step(delta);self.wait(co,'paused')
+        self.assertEqual(len(opened),4)
+        self.assertEqual(len(co.previous),2);self.assertAlmostEqual(co.position,9.9)
+        self.assertTrue(all(not c.closed for c in opened))
 
 
 if __name__=='__main__':unittest.main()

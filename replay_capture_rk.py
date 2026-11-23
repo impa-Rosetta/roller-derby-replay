@@ -6,6 +6,8 @@ The single-camera app retains its existing OpenCV capture factory.
 """
 import json
 import logging
+from collections import OrderedDict
+import threading
 
 import cv2
 import numpy as np
@@ -114,7 +116,82 @@ class HardwareReplayCapture:
             self.pipe = None
 
 
-def open_replay(info, width, report):
+class CachedReplayCapture:
+    """Keep the decoder cursor independent from the displayed frame cursor.
+
+    Rewinding cached pictures must not flush NVDEC. An uncached reverse step
+    fills a small preceding window in one seek, rather than seeking per key.
+    The lock also makes a superseded background request safe to finish.
+    """
+    def __init__(self,source,info,max_bytes=128*1024*1024,backfill=16,factory=None):
+        self.source=source;self.frames=info['frames'];self.fps=info['fps']
+        self.position=0;self.decoder_position=0;self.cache=OrderedDict()
+        self.cache_bytes=0;self.max_bytes=max_bytes;self.backfill=backfill
+        self.lock=threading.RLock();self.closed=False
+        self.factory=factory
+
+    def isOpened(self):
+        with self.lock:return not self.closed and (self.source is None or self.source.isOpened())
+
+    def get(self,prop):
+        with self.lock:
+            if prop==cv2.CAP_PROP_POS_FRAMES:return self.position
+            if prop==cv2.CAP_PROP_POS_MSEC:return round(self.position*1000/self.fps)
+            if prop==cv2.CAP_PROP_FPS:return self.fps
+            if prop==cv2.CAP_PROP_FRAME_COUNT:return self.frames
+            return self.source.get(prop) if self.source is not None else 0
+
+    def set(self,prop,value):
+        with self.lock:
+            if self.closed or prop!=cv2.CAP_PROP_POS_FRAMES:return False
+            self.position=max(0,min(self.frames-1,int(value)))
+            return True
+
+    def remember(self,index,image):
+        old=self.cache.pop(index,None)
+        if old is not None:self.cache_bytes-=old.nbytes
+        self.cache[index]=image;self.cache_bytes+=image.nbytes
+        while self.cache_bytes>self.max_bytes and len(self.cache)>1:
+            _,old=self.cache.popitem(last=False);self.cache_bytes-=old.nbytes
+
+    def read_at(self,index):
+        with self.lock:
+            if self.closed or not 0<=index<self.frames:return False,None
+            index=int(index)
+            if index in self.cache:
+                image=self.cache[index];self.cache.move_to_end(index)
+                self.position=index+1;return True,image
+            if self.source is None:
+                self.source=self.factory();self.decoder_position=0
+            if not self.decoder_position<=index<=self.decoder_position+8:
+                start=max(0,index-self.backfill) if index<self.decoder_position else index
+                if not self.source.set(cv2.CAP_PROP_POS_FRAMES,start):return False,None
+                self.decoder_position=start
+            image=None
+            while self.decoder_position<=index:
+                ok,image=self.source.read()
+                if not ok:return False,None
+                self.remember(self.decoder_position,image);self.decoder_position+=1
+            self.position=index+1
+            return True,image
+
+    def read(self):
+        with self.lock:return self.read_at(self.position)
+
+    def release(self):
+        with self.lock:
+            if not self.closed:
+                self.closed=True;self.cache.clear();self.cache_bytes=0
+                if self.source is not None:self.source.release()
+
+    def park(self):
+        """Retain pictures from the previous segment without holding NVDEC."""
+        with self.lock:
+            if self.factory is not None and not self.closed and self.source is not None:
+                self.source.release();self.source=None;self.decoder_position=0
+
+
+def open_replay_source(info, width, report):
     try:
         capture = HardwareReplayCapture(info, width, report)
         LOG.info('Replay NVDEC opened: %s', info['mkv'])
@@ -123,3 +200,8 @@ def open_replay(info, width, report):
         LOG.exception('Replay NVDEC unavailable; using OpenCV software decoder')
         report('回放硬解不可用，回退软件解码（四路同时播放可能降速）')
         return cv2.VideoCapture(info['mkv'])
+
+
+def open_replay(info,width,report):
+    factory=lambda:open_replay_source(info,width,report)
+    return CachedReplayCapture(factory(),info,factory=factory)

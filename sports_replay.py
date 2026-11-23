@@ -235,50 +235,69 @@ class ReplayCoordinator:
         self.failed_files={}
         self.recoveries={}
         self.recovery_attempts={}
+        self.previous={}
 
     @staticmethod
     def release_future(future):
         def release(f):
-            try:f.result()['cap'].release()
+            try:
+                result=f.result()
+                if not result.get('borrowed'):result['cap'].release()
             except Exception:pass
         if not future.cancel():future.add_done_callback(release)
 
-    def discard_prepares(self):
-        for future in list(self.prepares.values())+list(self.neighbors.values())+list(self.recoveries.values()):
+    def discard_prepares(self,keep_neighbors=False):
+        for future in list(self.prepares.values())+([] if keep_neighbors else list(self.neighbors.values()))+list(self.recoveries.values()):
             self.release_future(future)
-        self.prepares.clear();self.neighbors.clear();self.recoveries.clear()
+        self.prepares.clear();self.recoveries.clear()
+        if not keep_neighbors:self.neighbors.clear()
 
     def shutdown(self):
         self.discard_prepares()
+        self.clear_previous()
         if self.pool:self.pool.shutdown(wait=False,cancel_futures=True)
 
-    def prepare_capture(self,key,seg,info,pos):
+    def clear_previous(self):
+        for item in self.previous.values():
+            if self.pool:self.pool.submit(item['cap'].release)
+            else:item['cap'].release()
+        self.previous.clear()
+
+    def prepare_capture(self,key,seg,info,pos,capture=None,borrowed=False):
         import cv2
         ctl=self.controllers[key]
-        cap=ctl._open_capture(info)
+        cap=capture if capture is not None else ctl._open_capture(info)
         try:
             fps=info['fps']
             index=max(0,min(info['frames']-1,round((pos-seg['start_s'])*fps)))
-            if not cap.set(cv2.CAP_PROP_POS_FRAMES,index):
-                raise RuntimeError('目标帧定位失败')
-            ok,frame=cap.read()
+            if hasattr(cap,'read_at'):
+                if capture is None and index>0:
+                    ok,frame=cap.read_at(max(0,index-8))
+                    if not ok:raise RuntimeError('无法读取目标帧之前的缓存窗口')
+                ok,frame=cap.read_at(index)
+            else:
+                if not cap.set(cv2.CAP_PROP_POS_FRAMES,index):raise RuntimeError('目标帧定位失败')
+                ok,frame=cap.read()
             if not ok:raise RuntimeError('无法读取目标帧')
             return dict(cap=cap,drawn=ctl._fit(frame),idx=index+1,fps=fps,
-                        seg=seg,info=info)
+                        seg=seg,info=info,borrowed=borrowed)
         except Exception as exc:
+            if borrowed:raise
             cap.release()
             # Initialization can succeed but the first accurate hardware seek
             # can still fail. Test the same source via software before calling
             # the recording undecodable; never substitute another moment.
-            from replay_capture_rk import HardwareReplayCapture
-            if not isinstance(cap,HardwareReplayCapture):raise
+            from replay_capture_rk import HardwareReplayCapture,CachedReplayCapture
+            if not isinstance(getattr(cap,'source',cap),HardwareReplayCapture):raise
             LOG.warning('%s hardware first-frame failed for %s: %s; trying software',key,seg['file'],exc)
             fallback=cv2.VideoCapture(info['mkv'])
             try:
                 if not fallback.set(cv2.CAP_PROP_POS_FRAMES,index):raise RuntimeError('软件定位失败')
                 ok,frame=fallback.read()
                 if not ok:raise RuntimeError('硬件和软件均无法读取目标帧')
-                return dict(cap=fallback,drawn=ctl._fit(frame),idx=index+1,fps=fps,seg=seg,info=info)
+                cached=CachedReplayCapture(fallback,info,factory=lambda:cv2.VideoCapture(info['mkv']))
+                cached.position=cached.decoder_position=index+1;cached.remember(index,frame)
+                return dict(cap=cached,drawn=ctl._fit(frame),idx=index+1,fps=fps,seg=seg,info=info)
             except Exception:
                 fallback.release();raise
 
@@ -326,9 +345,17 @@ class ReplayCoordinator:
 
     def install_capture(self,key,prepared):
         ctl=self.controllers[key]
-        if ctl.cap is not None:
+        if ctl.cap is not None and ctl.cap is not prepared['cap']:
             old=ctl.cap
-            if self.pool is not None:self.pool.submit(old.release)
+            previous=self.previous.pop(key,None)
+            if previous:
+                if self.pool:self.pool.submit(previous['cap'].release)
+                else:previous['cap'].release()
+            if getattr(old,'factory',None) is not None and getattr(ctl,'seg',None) and ctl.seg['file']!=prepared['seg']['file']:
+                self.previous[key]=dict(cap=old,seg=ctl.seg,directory=self.tracks[key].directory)
+                if self.pool:self.pool.submit(old.park)
+                else:old.park()
+            elif self.pool is not None:self.pool.submit(old.release)
             else:old.release()
         ctl.cap=prepared['cap'];ctl.drawn=prepared['drawn'];ctl.idx=prepared['idx']
         ctl.seg=prepared['seg'];ctl.fps=prepared['fps'];ctl.frame_count=prepared['info']['frames']
@@ -352,6 +379,7 @@ class ReplayCoordinator:
 
     def set_tracks(self, tracks):
         self.discard_prepares()
+        self.clear_previous()
         self.generation += 1
         self.tracks = tracks
         self.origin = min((t.start for t in tracks.values() if t.segments), default=0)
@@ -409,8 +437,9 @@ class ReplayCoordinator:
                           sports=True)
         ctl._marks=[];ctl._marks_loaded=True;ctl._marks_loaded_for=track.name
 
-    def seek(self, position, resume=True):
-        self.discard_prepares()
+    def seek(self, position, resume=True,reuse=False):
+        self.discard_prepares(keep_neighbors=reuse)
+        self.reuse_capture=reuse
         self.generation += 1
         self.position = max(0,min(self.duration-0.001,position)) if self.duration else 0
         self.anchor = self.now()
@@ -426,9 +455,11 @@ class ReplayCoordinator:
             if hasattr(ctl.loader,'clear_pending'):ctl.loader.clear_pending()
             self.bind(key)
             ctl.mode='replay';ctl.paused=True;ctl.ended=False;ctl.pending=None
-            ctl.drawn=None;ctl._jump_t=None
+            if not reuse:ctl.drawn=None
+            ctl._jump_t=None
             located = self.tracks[key].locate(self.origin+self.position)
             if located is None:
+                ctl.drawn=None
                 self.messages[key]='该时刻无录像'
                 continue
             seg,pos = located
@@ -439,6 +470,7 @@ class ReplayCoordinator:
 
     def live(self):
         self.discard_prepares()
+        self.clear_previous()
         self.generation += 1
         self.targets.clear()
         self.messages.clear()
@@ -464,7 +496,35 @@ class ReplayCoordinator:
         self.position=self.playhead();self.anchor=self.now();self.speed=speed
 
     def step(self, frames):
-        self.seek(self.playhead()+frames/59.2,False)
+        keys=self.participants
+        if not keys:return
+        position=self.playhead() if self.state!='live' else min(self.tracks[k].end for k in keys)-self.origin-.02
+        candidates=([self.selected] if self.selected in keys else [])+[k for k in keys if k!=self.selected]
+        for key in candidates:
+            track=self.tracks[key];ctl=self.controllers[key]
+            if self.state in ('paused','playing') and ctl.seg is not None and ctl.drawn is not None and key not in self.messages:
+                seg=ctl.seg;index=ctl.idx-1;break
+            located=track.locate(self.origin+max(0,position))
+            if located is None:continue
+            seg,pos=located;info=ctl.loader.clip(seg['file'])
+            fps=info['fps'] if info else seg['frames']/(seg['end_s']-seg['start_s'])
+            index=round((pos-seg['start_s'])*fps);break
+        else:
+            self.seek(position+frames/59.2,False,reuse=True);return
+        index+=frames
+        segments=track.segments;slot=next((i for i,s in enumerate(segments) if s['file']==seg['file']),0)
+        while True:
+            info=ctl.loader.clip(seg['file']);count=info['frames'] if info else seg['frames']
+            if index<0 and slot>0:
+                slot-=1;seg=segments[slot];previous=ctl.loader.clip(seg['file'])
+                index+=previous['frames'] if previous else seg['frames'];continue
+            if index>=count and slot+1<len(segments):
+                index-=count;slot+=1;seg=segments[slot];continue
+            index=max(0,min(count-1,index));break
+        fps=info['fps'] if info else count/(seg['end_s']-seg['start_s'])
+        a,b=track.bounds(seg)
+        wall=a+(index/fps)*(b-a)/(seg['end_s']-seg['start_s'])
+        self.seek(wall-self.origin,False,reuse=True)
 
     def recent(self, seconds, resume=True):
         ends=[self.tracks[k].end for k in self.participants if self.tracks[k].segments]
@@ -485,7 +545,20 @@ class ReplayCoordinator:
                 elif self.pool is None:ready[key]=(seg,info,pos)
                 else:
                     if key not in self.prepares:
-                        self.prepares[key]=self.pool.submit(self.prepare_capture,key,seg,info,pos)
+                        capture=None;borrowed=False
+                        if getattr(self,'reuse_capture',False):
+                            if ctl.cap is not None and ctl.seg and ctl.seg['file']==seg['file'] and hasattr(ctl.cap,'read_at'):
+                                capture=ctl.cap;borrowed=True
+                            else:
+                                previous=self.previous.get(key)
+                                if previous and previous['directory']==self.tracks[key].directory and previous['seg']['file']==seg['file']:
+                                    capture=previous['cap'];self.previous.pop(key)
+                                future=self.neighbors.get(key)
+                                if capture is None and future is not None and future.done() and future.exception() is None:
+                                    prepared=future.result()
+                                    if prepared['seg']['file']==seg['file']:
+                                        capture=prepared['cap'];self.neighbors.pop(key)
+                        self.prepares[key]=self.pool.submit(self.prepare_capture,key,seg,info,pos,capture,borrowed)
                     future=self.prepares[key]
                     if not future.done():waiting=True;continue
                     try:ready[key]=future.result()
@@ -527,7 +600,7 @@ class ReplayCoordinator:
             self.anchor=self.now()
             self.state='playing' if self.resume_after_load else 'paused'
             return
-        if self.state in ('playing','paused'):self.prefetch_neighbors()
+        if self.state=='playing':self.prefetch_neighbors()
         if self.state=='paused':
             for key in self.participants:
                 located=self.tracks[key].locate(self.origin+self.position)

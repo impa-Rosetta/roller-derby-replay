@@ -81,7 +81,7 @@ class CameraSurface:
         if co.state!='live' and co.linked and self.key not in co.tracks:
             img=None;note='本赛事未绑定该路录像'
         replay=c.mode=='replay'
-        if co.state=='loading' and self.key in co.participants:img=None
+        if co.state=='loading' and self.key in co.participants and not getattr(co,'reuse_capture',False):img=None
         alive=c.feed.alive()
         sig=(id(img),w,h,replay,note,alive,c.recording,self.app.selected,
              int(co.playhead()) if replay else int(c.feed.image_t))
