@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fail closed when the platform cannot meet the deployment contract."""
-import argparse,importlib,subprocess,json,os,platform
+import argparse,importlib,subprocess,json,os,platform,re
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--role',choices=['node','dgx'],required=True);p.add_argument('--require-camera',action='store_true');a=p.parse_args();errors=[];info={'role':a.role,'architecture':platform.machine()}
 for name in (['av','cv2','numpy'] if a.role=='node' else ['av','cv2','numpy','tkinter','gi','PIL.Image','PIL.ImageTk']):
@@ -21,6 +21,12 @@ if a.role=='node':
     proc=subprocess.run(['systemctl','is-enabled','--quiet','roller-replay-performance.service'],capture_output=True)
     info['persistent_performance']=proc.returncode==0
     if proc.returncode:errors.append('roller-replay-performance.service must be enabled to survive reboot')
+    if Path('/etc/init.d/cpufrequtils').exists():
+        defaults=Path('/etc/default/cpufrequtils')
+        text=defaults.read_text() if defaults.exists() else ''
+        values=re.findall(r'''^\s*GOVERNOR\s*=\s*["']?([a-z_]+)''',text,re.M)
+        info['cpufrequtils_governor']=values[-1] if values else None
+        if not values or values[-1]!='performance':errors.append('BSP cpufrequtils must default to performance to avoid boot-time governor override')
     os.environ.setdefault('MVCAM_COMMON_RUNENV','/opt/MVS/lib')
     import sys;sys.path.insert(0,'/opt/MVS/Samples/aarch64/Python/MvImport')
     try:import MvCameraControl_class;info['mvs']='loaded'

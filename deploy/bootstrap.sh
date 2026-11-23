@@ -17,6 +17,20 @@ if [[ "$role" == node ]]; then
  stamp=$(date +%Y%m%d_%H%M%S)
  { cat /sys/module/usbcore/parameters/usbfs_memory_mb; for f in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor /sys/class/devfreq/dmc/governor /sys/class/devfreq/*rkvenc-core/governor; do [[ -f "$f" ]] && echo "$f=$(cat "$f")"; done; } > "$HOME/hk_camera/runtime-before-$stamp.txt"
  here=$(cd "$(dirname "$0")" && pwd)
+ # BSP cpufrequtils otherwise races this service and restores interactive.
+ if [[ -f /etc/default/cpufrequtils ]]; then
+  cp -p /etc/default/cpufrequtils "$HOME/hk_camera/cpufrequtils-before-$stamp.txt"
+ fi
+ sudo -n /usr/bin/python3 - <<'PY'
+from pathlib import Path
+import re
+p=Path('/etc/default/cpufrequtils')
+text=p.read_text() if p.exists() else '# CPU policy for RK3588 replay capture\n'
+line='GOVERNOR="performance"'
+if re.search(r'^\s*GOVERNOR\s*=',text,re.M):text=re.sub(r'^\s*GOVERNOR\s*=.*$',line,text,flags=re.M)
+else:text=text.rstrip()+'\n'+line+'\n'
+p.write_text(text)
+PY
  sudo -n install -o root -g root -m 0755 "$here/roller-replay-performance.sh" /usr/local/sbin/roller-replay-performance
  sudo -n install -o root -g root -m 0644 "$here/roller-replay-performance.service" /etc/systemd/system/roller-replay-performance.service
  sudo -n systemctl daemon-reload

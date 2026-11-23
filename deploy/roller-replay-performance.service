@@ -1,6 +1,6 @@
 [Unit]
 Description=RK3588 replay capture performance governors
-After=local-fs.target systemd-modules-load.service
+After=local-fs.target systemd-modules-load.service loadcpufreq.service cpufrequtils.service
 Before=ssh.service
 ConditionPathExists=/proc/device-tree/compatible
 

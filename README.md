@@ -72,6 +72,9 @@ DGX 新增依赖 `python3-pil`、`python3-pil.imagetk`，已纳入环境安装�
 无需给 RK 安装新的依赖；沿用 SSH 密钥、Python 3 与 DGX/RK 两端的 rsync。管理范围为配置的节点录像目录与各机位的 DGX 归档目录，不包含其他个人视频文件。
 
 ## 新RK3588环境契约
+
+四台 RK 均须安装开机性能服务，同时将 BSP 的 cpufrequtils 默认 governor 配置为 performance，避免启动顺序竞争。固定有线地址和自连接配置应持久保存。DGX 保留手动打开监看台、手动开始录像；不安装监看台自启动。设备启动完成后，可在 DGX 执行 `python3 deploy/verify_boot.py --wait 120` 检查五台就绪状态，之后正常打开桌面快捷方式并按「全部开始」。完整规范及重启验收见 [部署规范](docs/DEPLOYMENT.md)。
+
 详见 [部署规范](docs/DEPLOYMENT.md)。必须先安装厂商兼容BSP、MVS和带Rockchip硬编的FFmpeg；部署脚本只安装/核验通用依赖，不会刷机、编译或凭空安装私有SDK。
 `deploy_node.py` 拒绝覆盖正在录制的节点，先备份旧入口，再上传代码、应用有记录的运行时性能配置，最后严格检查相机USB3速率。检查失败不是部署成功。
 
